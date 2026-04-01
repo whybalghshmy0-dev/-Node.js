@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 
 // ===== إعدادات البوت =====
-const token = '8798272294:AAEY_LIYnVRIY2T-WUP63duCn5V7VFgGsCE';
+const token = '8798272294:AAEY_LIYnVRIY2T-WUP63duCn5V7VFgGsCE'; // التوكن الجديد
 const developerId = '7411444902'; // ايدي لبيب
 const bot = new TelegramBot(token, { polling: true });
 
@@ -26,7 +26,7 @@ function saveUsersData() {
     fs.writeFileSync(usersFilePath, JSON.stringify(usersData, null, 2));
 }
 
-// دالة لتحديث بيانات المستخدم
+// دالة لتحديث بيانات المستخدم (عدد الرسائل، آخر تفاعل)
 function updateUserData(userId, userName, fullName) {
     const now = Date.now();
     if (!usersData[userId]) {
@@ -37,6 +37,7 @@ function updateUserData(userId, userName, fullName) {
             first_seen: now,
             last_seen: now,
             messages_count: 0,
+            last_reminder: 0,      // آخر وقت تم فيه إرسال رسالة الترحيب/التذكير
             banned: false,
             muted: false
         };
@@ -55,16 +56,44 @@ function formatLastSeen(timestamp) {
     return date.toLocaleString('ar-YE', { timeZone: 'Asia/Aden' });
 }
 
-// دالة إرسال قائمة المستخدمين للمطور
-async function sendUserList(chatId) {
+// ===== لوحة تحكم المطور (أزرار تفاعلية) =====
+const mainMenu = {
+    reply_markup: {
+        inline_keyboard: [
+            [{ text: '📊 عرض المستخدمين', callback_data: 'users' }],
+            [{ text: '➕ حظر مستخدم', callback_data: 'ban' }, { text: '🔓 رفع الحظر', callback_data: 'unban' }],
+            [{ text: '🔇 كتم مستخدم', callback_data: 'mute' }, { text: '🔊 رفع الكتم', callback_data: 'unmute' }],
+            [{ text: '👢 طرد مستخدم', callback_data: 'kick' }],
+            [{ text: '💬 رد على مستخدم', callback_data: 'reply' }],
+            [{ text: '📈 الإحصائيات', callback_data: 'stats' }]
+        ]
+    }
+};
+
+// دالة إرسال القائمة الرئيسية
+async function sendMainMenu(chatId) {
+    await bot.sendMessage(chatId, '🔧 **لوحة تحكم المطور**\nاختر الإجراء:', {
+        parse_mode: 'Markdown',
+        ...mainMenu
+    });
+}
+
+// دالة عرض قائمة المستخدمين (محددة)
+async function sendUserList(chatId, page = 1) {
     const users = Object.values(usersData).sort((a, b) => b.last_seen - a.last_seen);
     if (users.length === 0) {
         await bot.sendMessage(chatId, 'لا يوجد مستخدمون مسجلون بعد.');
         return;
     }
 
-    let message = '📊 **قائمة المستخدمين:**\n\n';
-    for (const user of users.slice(0, 20)) { // عرض 20 فقط لتجنب طول الرسالة
+    const perPage = 10;
+    const totalPages = Math.ceil(users.length / perPage);
+    const start = (page - 1) * perPage;
+    const end = start + perPage;
+    const pageUsers = users.slice(start, end);
+
+    let message = `📊 **قائمة المستخدمين (الصفحة ${page}/${totalPages})**\n\n`;
+    for (const user of pageUsers) {
         const status = [];
         if (user.banned) status.push('🚫 محظور');
         if (user.muted) status.push('🔇 مكتوم');
@@ -74,10 +103,69 @@ async function sendUserList(chatId) {
         message += `📨 رسائل: ${user.messages_count}\n`;
         message += `🕒 آخر تفاعل: ${formatLastSeen(user.last_seen)}${statusText}\n\n`;
     }
-    if (users.length > 20) message += `... و ${users.length - 20} مستخدم آخر.\n`;
-    message += '\nاستخدم الأوامر:\n/ban ID - /unban ID\n/mute ID - /unmute ID\n/kick ID\n/reply ID النص';
-    await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+
+    const navigation = [];
+    if (page > 1) navigation.push({ text: '⬅️ السابق', callback_data: `users_${page - 1}` });
+    if (page < totalPages) navigation.push({ text: 'التالي ➡️', callback_data: `users_${page + 1}` });
+    if (navigation.length) {
+        const replyMarkup = { inline_keyboard: [navigation] };
+        await bot.sendMessage(chatId, message, { parse_mode: 'Markdown', reply_markup: replyMarkup });
+    } else {
+        await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+    }
 }
+
+// ===== معالجة الأوامر والأزرار =====
+// أمر /panel للمطور
+bot.onText(/\/panel/, async (msg) => {
+    const chatId = msg.chat.id;
+    if (chatId.toString() !== developerId) return;
+    await sendMainMenu(chatId);
+});
+
+// معالجة الضغط على الأزرار (callback_query)
+bot.on('callback_query', async (callbackQuery) => {
+    const chatId = callbackQuery.message.chat.id;
+    const userId = callbackQuery.from.id;
+    const data = callbackQuery.data;
+
+    if (chatId.toString() !== developerId && userId.toString() !== developerId) return;
+    await bot.answerCallbackQuery(callbackQuery.id);
+
+    if (data === 'users') {
+        await sendUserList(chatId);
+    } 
+    else if (data.startsWith('users_')) {
+        const page = parseInt(data.split('_')[1]);
+        await sendUserList(chatId, page);
+    }
+    else if (data === 'ban') {
+        await bot.sendMessage(chatId, '🔨 أرسل معرف المستخدم لحظره:\n`/ban ID`', { parse_mode: 'Markdown' });
+    }
+    else if (data === 'unban') {
+        await bot.sendMessage(chatId, '🔓 أرسل معرف المستخدم لرفع الحظر:\n`/unban ID`', { parse_mode: 'Markdown' });
+    }
+    else if (data === 'mute') {
+        await bot.sendMessage(chatId, '🔇 أرسل معرف المستخدم لكتمه:\n`/mute ID`', { parse_mode: 'Markdown' });
+    }
+    else if (data === 'unmute') {
+        await bot.sendMessage(chatId, '🔊 أرسل معرف المستخدم لرفع الكتم:\n`/unmute ID`', { parse_mode: 'Markdown' });
+    }
+    else if (data === 'kick') {
+        await bot.sendMessage(chatId, '👢 أرسل معرف المستخدم لطرده:\n`/kick ID`', { parse_mode: 'Markdown' });
+    }
+    else if (data === 'reply') {
+        await bot.sendMessage(chatId, '💬 أرسل معرف المستخدم ثم النص:\n`/reply ID النص`', { parse_mode: 'Markdown' });
+    }
+    else if (data === 'stats') {
+        const totalUsers = Object.keys(usersData).length;
+        const banned = Object.values(usersData).filter(u => u.banned).length;
+        const muted = Object.values(usersData).filter(u => u.muted).length;
+        const totalMessages = Object.values(usersData).reduce((sum, u) => sum + (u.messages_count || 0), 0);
+        const statsMsg = `📈 **الإحصائيات**\n\n👥 إجمالي المستخدمين: ${totalUsers}\n🚫 محظورون: ${banned}\n🔇 مكتومون: ${muted}\n💬 إجمالي الرسائل: ${totalMessages}`;
+        await bot.sendMessage(chatId, statsMsg, { parse_mode: 'Markdown' });
+    }
+});
 
 // ===== قائمة بأنواع الوسائط القابلة للتوجيه =====
 const forwardableTypes = [
@@ -85,7 +173,6 @@ const forwardableTypes = [
     'sticker', 'animation', 'location', 'venue', 'contact', 'poll'
 ];
 
-// دالة لاستخراج نوع الوسائط
 function getMediaType(msg) {
     for (let type of forwardableTypes) {
         if (msg[type]) return type;
@@ -93,7 +180,6 @@ function getMediaType(msg) {
     return null;
 }
 
-// دالة بناء التقرير
 function buildReport(msg, mediaType) {
     const userId = msg.from.id;
     const userName = msg.from.username || 'بدون يوزر';
@@ -108,47 +194,28 @@ function buildReport(msg, mediaType) {
     report += `🌍 اللغة: ${lang}\n`;
     report += `🕒 الوقت: ${time}\n`;
 
-    if (mediaType) {
-        report += `📎 نوع الوسائط: ${mediaType.toUpperCase()}\n`;
-    }
-
+    if (mediaType) report += `📎 نوع الوسائط: ${mediaType.toUpperCase()}\n`;
     let caption = msg.caption || msg.text;
-    if (caption) {
-        report += `💬 النص: ${caption}\n`;
-    }
-
-    if (msg.location) {
-        report += `📍 الموقع: ${msg.location.latitude}, ${msg.location.longitude}\n`;
-    }
-    if (msg.venue) {
-        report += `🏢 المكان: ${msg.venue.title}\n${msg.venue.address}\n`;
-    }
-    if (msg.contact) {
-        report += `📞 جهة اتصال: ${msg.contact.first_name} ${msg.contact.last_name || ''}\nرقم: ${msg.contact.phone_number}\n`;
-    }
-    if (msg.poll) {
-        report += `📊 استطلاع: ${msg.poll.question}\n`;
-    }
+    if (caption) report += `💬 النص: ${caption}\n`;
+    if (msg.location) report += `📍 الموقع: ${msg.location.latitude}, ${msg.location.longitude}\n`;
+    if (msg.venue) report += `🏢 المكان: ${msg.venue.title}\n${msg.venue.address}\n`;
+    if (msg.contact) report += `📞 جهة اتصال: ${msg.contact.first_name} ${msg.contact.last_name || ''}\nرقم: ${msg.contact.phone_number}\n`;
+    if (msg.poll) report += `📊 استطلاع: ${msg.poll.question}\n`;
 
     return report;
 }
 
-// ===== معالجة الأوامر للمطور =====
-bot.onText(/^\/(users|ban|unban|mute|unmute|kick|reply)(?:\s+(.+))?/, async (msg, match) => {
+// ===== معالجة أوامر المطور النصية (للتكامل مع الأزرار) =====
+bot.onText(/^\/(ban|unban|mute|unmute|kick|reply)(?:\s+(.+))?/, async (msg, match) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
-
-    // التأكد أن الأمر من المطور فقط
     if (chatId.toString() !== developerId && userId.toString() !== developerId) return;
 
     const command = match[1];
     const args = match[2] ? match[2].trim().split(/\s+/) : [];
 
     try {
-        if (command === 'users') {
-            await sendUserList(chatId);
-        }
-        else if (command === 'ban') {
+        if (command === 'ban') {
             if (!args[0]) return bot.sendMessage(chatId, 'يرجى إدخال معرف المستخدم: /ban ID');
             const targetId = args[0];
             if (!usersData[targetId]) usersData[targetId] = { banned: false, muted: false };
@@ -164,7 +231,7 @@ bot.onText(/^\/(users|ban|unban|mute|unmute|kick|reply)(?:\s+(.+))?/, async (msg
                 saveUsersData();
                 await bot.sendMessage(chatId, `✅ تم رفع الحظر عن المستخدم \`${targetId}\`.`, { parse_mode: 'Markdown' });
             } else {
-                await bot.sendMessage(chatId, `المستخدم \`${targetId}\` غير موجود في البيانات.`, { parse_mode: 'Markdown' });
+                await bot.sendMessage(chatId, `المستخدم \`${targetId}\` غير موجود.`, { parse_mode: 'Markdown' });
             }
         }
         else if (command === 'mute') {
@@ -183,7 +250,7 @@ bot.onText(/^\/(users|ban|unban|mute|unmute|kick|reply)(?:\s+(.+))?/, async (msg
                 saveUsersData();
                 await bot.sendMessage(chatId, `✅ تم رفع الكتم عن المستخدم \`${targetId}\`.`, { parse_mode: 'Markdown' });
             } else {
-                await bot.sendMessage(chatId, `المستخدم \`${targetId}\` غير موجود في البيانات.`, { parse_mode: 'Markdown' });
+                await bot.sendMessage(chatId, `المستخدم \`${targetId}\` غير موجود.`, { parse_mode: 'Markdown' });
             }
         }
         else if (command === 'kick') {
@@ -222,47 +289,56 @@ bot.on('message', async (msg) => {
     const fullName = `${msg.from.first_name || ''} ${msg.from.last_name || ''}`.trim();
 
     try {
-        // تحديث بيانات المستخدم (عدد الرسائل وآخر تفاعل)
+        // تحديث بيانات المستخدم
         updateUserData(userId, userName, fullName);
+        const user = usersData[userId];
 
         // التحقق من الحظر
-        if (usersData[userId] && usersData[userId].banned) {
+        if (user && user.banned) {
             await bot.sendMessage(chatId, '⛔ أنت محظور من التواصل مع هذا البوت.');
             return;
         }
 
-        // --- 1. نظام الرد الذكي (المطور يرد على رسالة) ---
+        // --- 1. الرد الذكي للمطور (عند الرد على رسالة في دردشة البوت) ---
         if (chatId.toString() === developerId && msg.reply_to_message) {
             const originalMsg = msg.reply_to_message.text || msg.reply_to_message.caption;
             if (originalMsg && originalMsg.includes('🆔 ID:')) {
                 const targetUserId = originalMsg.split('🆔 ID: ')[1].split('\n')[0].trim();
-                // نسخ رسالة المطور إلى المستخدم الأصلي
                 await bot.copyMessage(targetUserId, developerId, msg.message_id);
                 await bot.sendMessage(developerId, '✅ تم إرسال ردك للمستخدم.');
             }
             return;
         }
 
-        // --- 2. رسائل المستخدمين العاديين (غير المطور) ---
+        // --- 2. رسائل المستخدمين العاديين ---
         if (chatId.toString() !== developerId) {
-            // إذا كان المستخدم مكتوماً، لا نرسل رد للمستخدم (لكن نرسل التقرير للمطور)
-            const isMuted = usersData[userId] && usersData[userId].muted;
-
+            const isMuted = user && user.muted;
             const mediaType = getMediaType(msg);
             const report = buildReport(msg, mediaType);
 
-            // إرسال التقرير للمطور (مرة واحدة)
+            // إرسال التقرير للمطور
             await bot.sendMessage(developerId, report, { parse_mode: 'Markdown' });
 
-            // إعادة توجيه الوسائط (إذا وجدت) مرة واحدة فقط
+            // إعادة توجيه الوسائط
             if (mediaType) {
                 await bot.forwardMessage(developerId, chatId, msg.message_id);
             }
 
-            // الرد على المستخدم فقط إذا لم يكن مكتوماً
-            if (!isMuted) {
-                await bot.sendMessage(chatId, '✅ تم استلام رسالتك بنجاح، سيتم مراجعتها من قبل الإدارة.');
+            // --- إدارة رسالة الترحيب/التذكير (مرة كل 3 ساعات) ---
+            const now = Date.now();
+            const THREE_HOURS = 3 * 60 * 60 * 1000; // 3 ساعات
+
+            // إذا لم يسبق إرسال أي تذكير، أو مر أكثر من 3 ساعات على آخر تذكير
+            if (!user.last_reminder || (now - user.last_reminder) > THREE_HOURS) {
+                // تحديث وقت آخر تذكير
+                usersData[userId].last_reminder = now;
+                saveUsersData();
+
+                // إرسال رسالة الترحيب/التذكير
+                const welcomeMsg = `👋 أهلاً بك! يمكنك إرسال رسالتك (نص، صورة، فيديو، ملف، إلخ) وسوف تصل إلى المطور مباشرة.\n\n📌 سيتم الرد عليك في أقرب وقت.`;
+                await bot.sendMessage(chatId, welcomeMsg);
             }
+            // لا نرسل أي شيء آخر (لا رسالة "تم الاستلام" لتجنب الإزعاج)
         }
     } catch (error) {
         console.error('خطأ أثناء معالجة الرسالة:', error);

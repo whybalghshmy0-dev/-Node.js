@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 
 // ===== إعدادات البوت =====
-const token = '7848542948:AAE-V2jjHkBdgY8nMVKQVI_1hTBgVkoWnVE';
+const token = '8798272294:AAEY_LIYnVRIY2T-WUP63duCn5V7VFgGsCE';
 const developerId = '7411444902'; // ايدي لبيب
 const bot = new TelegramBot(token, { polling: true });
 

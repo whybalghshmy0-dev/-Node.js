@@ -1,10 +1,10 @@
 {
-  "name": "labib-bot",
-  "version": "1.0.0",
-  "description": "Telegram Bot for Labib",
-  "main": "index.js",
+  "name": "lkabot-chatgpt",
+  "version": "2.0.0",
+  "description": "Telegram Bot with ChatGPT + Admin Panel",
+  "main": "bot.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node bot.js"
   },
   "dependencies": {
     "node-telegram-bot-api": "^0.66.0",

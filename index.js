@@ -11,14 +11,20 @@ var OPENAI_API_KEY = 'sk-proj-bSQTWQK735X3M3LMtugouAU9zX9Xfuvk2Uf1BMNVQRLSPuEf8t
 var developerId = '7411444902';
 
 var bot = new TelegramBot(BOT_TOKEN, { polling: true });
-console.log('🤖 بوت ChatGPT + الرادار يعمل...');
+console.log('🤖 بوت لبيب AI يعمل...');
+
+// ===== ضبط أوامر البوت (تظهر دائماً في القائمة) =====
+bot.setMyCommands([
+    { command: 'start', description: '🏠 ابدأ من هنا' },
+    { command: 'clear', description: '🗑️ مسح المحادثة' }
+]).catch(function(e) { console.log('setMyCommands error:', e.message); });
 
 // ===== ملفات التخزين =====
 var usersFilePath = path.join(__dirname, 'users_data.json');
 var chatsFilePath = path.join(__dirname, 'chats_data.json');
 
 var usersData = {};
-var chatsData = {}; // ذاكرة المحادثات لكل مستخدم
+var chatsData = {};
 
 if (fs.existsSync(usersFilePath)) {
     try { usersData = JSON.parse(fs.readFileSync(usersFilePath, 'utf8')); } catch (e) { usersData = {}; }
@@ -108,8 +114,7 @@ function getChatHistory(userId) {
 
 function addToHistory(userId, role, content) {
     if (!chatsData[userId]) chatsData[userId] = [];
-    chatsData[userId].push({ role: role, content: content });
-    // نحتفظ بآخر 50 رسالة لكل مستخدم
+    chatsData[userId].push({ role: role, content: content, ts: Date.now() });
     if (chatsData[userId].length > 50) {
         chatsData[userId] = chatsData[userId].slice(-50);
     }
@@ -121,19 +126,40 @@ function clearHistory(userId) {
     saveChatsData();
 }
 
-// ===== الرسالة النظامية لـ ChatGPT =====
-var SYSTEM_PROMPT = 'أنت مساعد ذكي متعدد المهارات. اسمك "لبيب AI". أنت تتحدث العربية بطلاقة وتفهم كل اللغات. أنت خبير في كل المجالات: البرمجة، التصميم، الشبكات، التعليم، الطب، القانون، الأعمال، وكل شيء آخر. أجب بشكل مفصل ومفيد. استخدم الإيموجي بشكل معتدل. لو سألك أحد عن نفسك قل أنك "لبيب AI" مساعد ذكي مبني على تقنيات الذكاء الاصطناعي المتقدمة.';
+// ===== الرسالة النظامية - هوية لبيب AI =====
+var SYSTEM_PROMPT = `أنت مساعد ذكي متعدد المهارات اسمك "لبيب". أنت تتحدث العربية بطلاقة وتفهم كل اللغات.
+أنت خبير في كل المجالات: البرمجة، التصميم، الشبكات، التعليم، الطب، القانون، الأعمال، وكل شيء آخر.
+أجب بشكل مفصل ومفيد. استخدم الإيموجي بشكل معتدل.
 
-// ===== دالة الرد بالذكاء الاصطناعي (نص) =====
-async function chatWithGPT(userId, userMessage) {
+قواعد مهمة جداً:
+- اسمك "لبيب" فقط، لا تذكر أبداً ChatGPT أو OpenAI أو GPT أو أي شركة ذكاء اصطناعي
+- إذا سألك أحد "من طورك؟" أو "من صنعك؟" أو "من برمجك؟" أو أي سؤال مشابه، قل فقط: "أنا لبيب، مساعد ذكي طوره فريق متخصص"
+- إذا سألك "هل أنت ChatGPT؟" أو "هل أنت من OpenAI؟" قل: "لا، أنا لبيب، مساعد ذكي مستقل"
+- تصرف كشخص طبيعي ذكي، لا تقل أنك نموذج لغوي أو AI
+- إذا ذكر أحد اسم "لبيب" في سياق التعرف عليك، تفاعل معه بشكل طبيعي كأنك تعرف نفسك بهذا الاسم`;
+
+// ===== الرسالة النظامية للتفكير العميق =====
+var DEEP_THINK_PROMPT = `أنت لبيب، مساعد ذكي متخصص في التحليل العميق والتفكير النقدي.
+عند الإجابة:
+1. حلل الموضوع من جميع الزوايا والأبعاد
+2. قدم حججاً وأدلة منطقية
+3. اذكر الإيجابيات والسلبيات
+4. قدم خلاصة واضحة وتوصيات عملية
+5. استخدم أمثلة واقعية
+
+قواعد الهوية: اسمك "لبيب" فقط، لا تذكر ChatGPT أو OpenAI أبداً.`;
+
+// ===== دالة الرد بالذكاء الاصطناعي =====
+async function chatWithGPT(userId, userMessage, deepThink) {
     var history = getChatHistory(userId);
     addToHistory(userId, 'user', userMessage);
 
-    var messages = [{ role: 'system', content: SYSTEM_PROMPT }];
-    // إضافة آخر 40 رسالة من السجل
+    var sysPrompt = deepThink ? DEEP_THINK_PROMPT : SYSTEM_PROMPT;
+    var messages = [{ role: 'system', content: sysPrompt }];
     var recentHistory = history.slice(-40);
     for (var i = 0; i < recentHistory.length; i++) {
-        messages.push(recentHistory[i]);
+        var h = recentHistory[i];
+        messages.push({ role: h.role, content: h.content });
     }
 
     try {
@@ -141,21 +167,20 @@ async function chatWithGPT(userId, userMessage) {
             model: 'gpt-4o',
             messages: messages,
             max_tokens: 4096,
-            temperature: 0.7
+            temperature: deepThink ? 0.9 : 0.7
         });
 
         if (response.error) {
-            // لو الموديل مو متاح، نجرب gpt-4o-mini
             if (response.error.code === 'model_not_found' || response.error.type === 'invalid_request_error') {
                 response = await callOpenAI('/v1/chat/completions', {
                     model: 'gpt-4o-mini',
                     messages: messages,
                     max_tokens: 4096,
-                    temperature: 0.7
+                    temperature: deepThink ? 0.9 : 0.7
                 });
             }
             if (response.error) {
-                return '⚠️ خطأ من OpenAI: ' + (response.error.message || JSON.stringify(response.error));
+                return '⚠️ حدث خطأ في الاتصال. حاول مرة ثانية.';
             }
         }
 
@@ -167,7 +192,7 @@ async function chatWithGPT(userId, userMessage) {
     }
 }
 
-// ===== دالة تحليل الصور بالذكاء الاصطناعي =====
+// ===== دالة تحليل الصور =====
 async function analyzeImage(userId, fileId, caption) {
     var base64 = await getFileBase64(fileId);
     var userContent = [];
@@ -183,9 +208,8 @@ async function analyzeImage(userId, fileId, caption) {
 
     var messages = [{ role: 'system', content: SYSTEM_PROMPT }];
     var history = getChatHistory(userId).slice(-30);
-    // نضيف السجل بدون الرسالة الأخيرة (لأننا سنضيفها بالصورة)
     for (var i = 0; i < history.length - 1; i++) {
-        messages.push(history[i]);
+        messages.push({ role: history[i].role, content: history[i].content });
     }
     messages.push({ role: 'user', content: userContent });
 
@@ -202,7 +226,7 @@ async function analyzeImage(userId, fileId, caption) {
                 messages: messages,
                 max_tokens: 4096
             });
-            if (response.error) return '⚠️ خطأ: ' + (response.error.message || '');
+            if (response.error) return '⚠️ خطأ في تحليل الصورة.';
         }
 
         var reply = response.choices[0].message.content;
@@ -225,7 +249,6 @@ async function generateImage(userId, prompt) {
         });
 
         if (response.error) {
-            // جرب dall-e-2
             response = await callOpenAI('/v1/images/generations', {
                 model: 'dall-e-2',
                 prompt: prompt,
@@ -248,12 +271,10 @@ async function generateImage(userId, prompt) {
 async function analyzeDocument(userId, fileId, fileName, caption) {
     try {
         var buffer = await downloadTelegramFile(fileId);
-        var textContent = buffer.toString('utf8').substring(0, 15000); // أول 15000 حرف
-
+        var textContent = buffer.toString('utf8').substring(0, 15000);
         var prompt = caption || 'حلل هذا الملف وأخبرني بمحتواه:';
         prompt += '\n\n--- محتوى الملف (' + fileName + ') ---\n' + textContent;
-
-        return await chatWithGPT(userId, prompt);
+        return await chatWithGPT(userId, prompt, false);
     } catch (err) {
         return '⚠️ خطأ في تحليل الملف: ' + err.message;
     }
@@ -264,10 +285,7 @@ function splitMessage(text, maxLen) {
     maxLen = maxLen || 4000;
     var parts = [];
     while (text.length > 0) {
-        if (text.length <= maxLen) {
-            parts.push(text);
-            break;
-        }
+        if (text.length <= maxLen) { parts.push(text); break; }
         var splitAt = text.lastIndexOf('\n', maxLen);
         if (splitAt < maxLen / 2) splitAt = maxLen;
         parts.push(text.substring(0, splitAt));
@@ -282,11 +300,15 @@ async function sendLongReply(chatId, text, replyToId) {
     for (var i = 0; i < parts.length; i++) {
         var opts = {};
         if (i === 0 && replyToId) opts.reply_to_message_id = replyToId;
-        await bot.sendMessage(chatId, parts[i]);
+        try {
+            await bot.sendMessage(chatId, parts[i], opts);
+        } catch (e) {
+            await bot.sendMessage(chatId, parts[i]);
+        }
     }
 }
 
-// ===== رسالة الترحيب مع المميزات =====
+// ===== رسالة الترحيب =====
 var WELCOME_MESSAGE = '🤖 *مرحباً بك في لبيب AI!*\n\n'
     + 'أنا مساعدك الذكي المدعوم بالذكاء الاصطناعي. إليك ما أقدر أسويه لك:\n\n'
     + '💬 *محادثة ذكية* - اسألني أي سؤال وبأجاوبك\n'
@@ -356,7 +378,7 @@ async function sendMainMenu(chatId, editMsgId) {
     text += '💬 الرسائل: ' + msgs + '\n\n⬇️ *اختر:*';
 
     var kb = { inline_keyboard: [
-        [{ text: '📊 المستخدمين', callback_data: 'list_users_1' }],
+        [{ text: '📊 المستخدمين', callback_data: 'list_users_1' }, { text: '💬 محادثات', callback_data: 'list_chats_1' }],
         [{ text: '🔨 حظر', callback_data: 'pick_ban_1' }, { text: '🔓 رفع حظر', callback_data: 'pick_unban_1' }],
         [{ text: '🔇 كتم', callback_data: 'pick_mute_1' }, { text: '🔊 رفع كتم', callback_data: 'pick_unmute_1' }],
         [{ text: '👢 طرد', callback_data: 'pick_kick_1' }, { text: '💬 رد', callback_data: 'pick_reply_1' }],
@@ -368,6 +390,65 @@ async function sendMainMenu(chatId, editMsgId) {
         try { await bot.editMessageText(text, { chat_id: chatId, message_id: editMsgId, parse_mode: 'Markdown', reply_markup: kb }); return; } catch (e) {}
     }
     await bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: kb });
+}
+
+// ===== عرض محادثة مستخدم =====
+async function sendUserChat(chatId, targetId, page, editMsgId) {
+    var history = chatsData[targetId] || [];
+    var u = usersData[targetId];
+    var userName = u ? getUserDisplayName(u) : ('ID: ' + targetId);
+
+    if (history.length === 0) {
+        var noChat = '💬 *محادثة: ' + userName + '*\n\n📭 لا توجد رسائل محفوظة.';
+        var backBtn = { inline_keyboard: [[{ text: '🔙 رجوع', callback_data: 'list_chats_1' }]] };
+        if (editMsgId) {
+            try { await bot.editMessageText(noChat, { chat_id: chatId, message_id: editMsgId, parse_mode: 'Markdown', reply_markup: backBtn }); return; } catch (e) {}
+        }
+        await bot.sendMessage(chatId, noChat, { parse_mode: 'Markdown', reply_markup: backBtn });
+        return;
+    }
+
+    var perPage = 5;
+    var totalPages = Math.ceil(history.length / perPage) || 1;
+    if (page < 1) page = 1;
+    if (page > totalPages) page = totalPages;
+
+    // نعرض الأحدث أولاً
+    var reversed = history.slice().reverse();
+    var start = (page - 1) * perPage;
+    var pageItems = reversed.slice(start, start + perPage);
+
+    var text = '💬 *محادثة: ' + userName + '*\n';
+    text += '📊 ' + history.length + ' رسالة | صفحة ' + page + '/' + totalPages + '\n';
+    text += '─────────────────\n';
+
+    for (var i = 0; i < pageItems.length; i++) {
+        var item = pageItems[i];
+        var roleIcon = item.role === 'user' ? '👤' : '🤖';
+        var roleLabel = item.role === 'user' ? 'المستخدم' : 'لبيب';
+        var timeStr = item.ts ? formatTime(item.ts) : '';
+        var content = typeof item.content === 'string' ? item.content : '[محتوى متعدد]';
+        content = content.substring(0, 200);
+        if (item.content && item.content.length > 200) content += '...';
+        text += '\n' + roleIcon + ' *' + roleLabel + '*';
+        if (timeStr) text += ' | ' + timeStr;
+        text += '\n' + content + '\n';
+    }
+
+    var navRow = [];
+    if (page > 1) navRow.push({ text: '⬅️ أحدث', callback_data: 'chat_' + targetId + '_' + (page - 1) });
+    navRow.push({ text: page + '/' + totalPages, callback_data: 'noop' });
+    if (page < totalPages) navRow.push({ text: 'أقدم ➡️', callback_data: 'chat_' + targetId + '_' + (page + 1) });
+
+    var kb = [];
+    if (navRow.length > 0) kb.push(navRow);
+    kb.push([{ text: '🗑️ مسح المحادثة', callback_data: 'clearchat_' + targetId }, { text: '💬 رد', callback_data: 'do_reply_' + targetId }]);
+    kb.push([{ text: '🔙 رجوع للمحادثات', callback_data: 'list_chats_1' }]);
+
+    if (editMsgId) {
+        try { await bot.editMessageText(text, { chat_id: chatId, message_id: editMsgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: kb } }); return; } catch (e) {}
+    }
+    await bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: kb } });
 }
 
 // ===== /start =====
@@ -387,14 +468,14 @@ bot.onText(/^\/(start|panel)$/, async function(msg) {
     await bot.sendMessage(chatId, WELCOME_MESSAGE, { parse_mode: 'Markdown', reply_markup: WELCOME_BUTTONS });
 });
 
-// ===== /clear - مسح المحادثة =====
+// ===== /clear =====
 bot.onText(/^\/clear$/, async function(msg) {
     var chatId = msg.chat.id;
     clearHistory(chatId);
     await bot.sendMessage(chatId, '🗑️ تم مسح سجل المحادثة بالكامل!\n\nيمكنك البدء من جديد.');
 });
 
-// ===== معالجة أزرار المستخدمين العاديين =====
+// ===== معالجة أزرار =====
 bot.on('callback_query', async function(query) {
     var chatId = query.message.chat.id;
     var userId = query.from.id;
@@ -403,21 +484,21 @@ bot.on('callback_query', async function(query) {
 
     await bot.answerCallbackQuery(query.id);
 
-    // ===== أزرار المستخدم العادي (مساعدة) =====
+    // ===== أزرار المستخدم العادي =====
     if (data === 'help_image') {
-        await bot.sendMessage(chatId, '🎨 *إنشاء صور*\n\nاكتب "ارسم" ثم وصف الصورة اللي تبيها.\n\nأمثلة:\n• ارسم قطة تلعب بالكرة\n• ارسم منظر طبيعي مع جبال وبحيرة\n• ارسم شعار لشركة تقنية', { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, '🎨 *إنشاء صور*\n\nاكتب "ارسم" ثم وصف الصورة اللي تبيها.\n\nأمثلة:\n• ارسم قطة تلعب بالكرة\n• ارسم منظر طبيعي مع جبال وبحيرة', { parse_mode: 'Markdown' });
         return;
     }
     if (data === 'help_think') {
-        await bot.sendMessage(chatId, '🧠 *التفكير العميق*\n\nاكتب "فكر:" ثم سؤالك للحصول على تحليل معمق.\n\nأمثلة:\n• فكر: ما هو مستقبل الذكاء الاصطناعي؟\n• فكر: كيف أبدأ مشروع تجاري ناجح؟\n• فكر: حلل لي أسباب التضخم الاقتصادي', { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, '🧠 *التفكير العميق*\n\nاكتب "فكر:" ثم سؤالك للحصول على تحليل معمق.\n\nأمثلة:\n• فكر: ما هو مستقبل الذكاء الاصطناعي؟\n• فكر: كيف أبدأ مشروع تجاري ناجح؟', { parse_mode: 'Markdown' });
         return;
     }
     if (data === 'help_code') {
-        await bot.sendMessage(chatId, '💻 *مساعدة برمجية*\n\nاسألني أي سؤال برمجي أو اطلب كود.\n\nأمثلة:\n• اكتب لي كود Python لحساب المتوسط\n• اشرح لي JavaScript promises\n• صحح لي هذا الكود: [الصق الكود]', { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, '💻 *مساعدة برمجية*\n\nاسألني أي سؤال برمجي أو اطلب كود.\n\nأمثلة:\n• اكتب لي كود Python لحساب المتوسط\n• اشرح لي JavaScript promises', { parse_mode: 'Markdown' });
         return;
     }
     if (data === 'help_translate') {
-        await bot.sendMessage(chatId, '🌐 *ترجمة*\n\nاكتب "ترجم" ثم النص.\n\nأمثلة:\n• ترجم للإنجليزية: مرحباً كيف حالك\n• ترجم للعربية: Hello how are you\n• ترجم للفرنسية: أنا أحب البرمجة', { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, '🌐 *ترجمة*\n\nاكتب "ترجم" ثم النص.\n\nأمثلة:\n• ترجم للإنجليزية: مرحباً كيف حالك\n• ترجم للعربية: Hello how are you', { parse_mode: 'Markdown' });
         return;
     }
     if (data === 'help_all') {
@@ -432,18 +513,71 @@ bot.on('callback_query', async function(query) {
         return;
     }
 
-    // ===== أزرار المطور =====
+    // ===== أزرار المطور فقط =====
     if (chatId.toString() !== developerId && userId.toString() !== developerId) return;
 
     try {
         if (data === 'main_menu') { developerState = {}; await sendMainMenu(chatId, msgId); }
         else if (data === 'noop') { }
+
+        // ===== قائمة المستخدمين =====
         else if (data.startsWith('list_users_')) {
             var pg = parseInt(data.replace('list_users_', ''));
             var r = buildUserButtons('view_user', pg, null);
             var t = '📊 *المستخدمين* (' + r.total + ')\n\nاضغط لعرض التفاصيل:';
             try { await bot.editMessageText(t, { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: r.buttons } }); } catch (e) { await bot.sendMessage(chatId, t, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: r.buttons } }); }
         }
+
+        // ===== قائمة المحادثات =====
+        else if (data.startsWith('list_chats_')) {
+            var pgC = parseInt(data.replace('list_chats_', ''));
+            // نبني قائمة المستخدمين الذين لديهم محادثات
+            var usersWithChats = Object.values(usersData).filter(function(u) {
+                return chatsData[u.id] && chatsData[u.id].length > 0;
+            });
+            usersWithChats.sort(function(a, b) { return b.last_seen - a.last_seen; });
+            var perPageC = 8;
+            var totalPagesC = Math.ceil(usersWithChats.length / perPageC) || 1;
+            if (pgC < 1) pgC = 1;
+            if (pgC > totalPagesC) pgC = totalPagesC;
+            var startC = (pgC - 1) * perPageC;
+            var pageUsersC = usersWithChats.slice(startC, startC + perPageC);
+            var btnsC = [];
+            for (var ci = 0; ci < pageUsersC.length; ci++) {
+                var uc = pageUsersC[ci];
+                var chatCount = chatsData[uc.id] ? chatsData[uc.id].length : 0;
+                var labelC = '💬 ' + (uc.name || 'بدون اسم');
+                if (uc.username) labelC += ' @' + uc.username;
+                labelC += ' (' + chatCount + ')';
+                btnsC.push([{ text: labelC, callback_data: 'chat_' + uc.id + '_1' }]);
+            }
+            var navRowC = [];
+            if (pgC > 1) navRowC.push({ text: '⬅️', callback_data: 'list_chats_' + (pgC - 1) });
+            navRowC.push({ text: pgC + '/' + totalPagesC, callback_data: 'noop' });
+            if (pgC < totalPagesC) navRowC.push({ text: '➡️', callback_data: 'list_chats_' + (pgC + 1) });
+            if (navRowC.length > 0) btnsC.push(navRowC);
+            btnsC.push([{ text: '🔙 رجوع', callback_data: 'main_menu' }]);
+            var tC = '💬 *محادثات المستخدمين* (' + usersWithChats.length + ')\n\nاضغط لعرض المحادثة:';
+            try { await bot.editMessageText(tC, { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: btnsC } }); } catch (e) { await bot.sendMessage(chatId, tC, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btnsC } }); }
+        }
+
+        // ===== عرض محادثة مستخدم =====
+        else if (data.match(/^chat_\d+_\d+$/)) {
+            var parts0 = data.split('_');
+            var chatTargetId = parts0[1];
+            var chatPage = parseInt(parts0[2]) || 1;
+            await sendUserChat(chatId, chatTargetId, chatPage, msgId);
+        }
+
+        // ===== مسح محادثة مستخدم =====
+        else if (data.startsWith('clearchat_')) {
+            var clearTargetId = data.replace('clearchat_', '');
+            clearHistory(clearTargetId);
+            var clearMsg = '✅ تم مسح محادثة المستخدم `' + clearTargetId + '`';
+            try { await bot.editMessageText(clearMsg, { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🔙 رجوع', callback_data: 'list_chats_1' }]] } }); } catch (e) {}
+        }
+
+        // ===== تفاصيل مستخدم =====
         else if (data.startsWith('view_user_page_')) {
             var pg2 = parseInt(data.replace('view_user_page_', ''));
             var r2 = buildUserButtons('view_user', pg2, null);
@@ -454,15 +588,18 @@ bot.on('callback_query', async function(query) {
             var tid = data.replace('view_user_', '');
             var u = usersData[tid];
             if (!u) { await bot.sendMessage(chatId, '❌ غير موجود'); return; }
-            var dt = '👤 *تفاصيل المستخدم*\n\n📝 ' + (u.name || '-') + '\n🔗 ' + (u.username ? '@' + u.username : '-') + '\n🆔 `' + u.id + '`\n📨 ' + (u.messages_count || 0) + ' رسالة\n🕒 ' + formatTime(u.last_seen) + '\n🚫 ' + (u.banned ? 'محظور' : 'لا') + '\n🔇 ' + (u.muted ? 'مكتوم' : 'لا');
+            var chatHistLen = chatsData[tid] ? chatsData[tid].length : 0;
+            var dt = '👤 *تفاصيل المستخدم*\n\n📝 ' + (u.name || '-') + '\n🔗 ' + (u.username ? '@' + u.username : '-') + '\n🆔 `' + u.id + '`\n📨 ' + (u.messages_count || 0) + ' رسالة\n💬 ' + chatHistLen + ' رسالة في الذاكرة\n🕒 ' + formatTime(u.last_seen) + '\n🚫 ' + (u.banned ? 'محظور' : 'لا') + '\n🔇 ' + (u.muted ? 'مكتوم' : 'لا');
             var db = [
                 [{ text: u.banned ? '🔓 رفع حظر' : '🔨 حظر', callback_data: 'do_' + (u.banned ? 'unban' : 'ban') + '_' + tid }, { text: u.muted ? '🔊 رفع كتم' : '🔇 كتم', callback_data: 'do_' + (u.muted ? 'unmute' : 'mute') + '_' + tid }],
                 [{ text: '💬 رد', callback_data: 'do_reply_' + tid }, { text: '👢 طرد', callback_data: 'do_kick_' + tid }],
+                [{ text: '📖 عرض المحادثة', callback_data: 'chat_' + tid + '_1' }],
                 [{ text: '🔙 رجوع', callback_data: 'list_users_1' }]
             ];
             try { await bot.editMessageText(dt, { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: db } }); } catch (e) {}
         }
-        // اختيار مستخدم لإجراء
+
+        // ===== اختيار مستخدم لإجراء =====
         else if (data.match(/^pick_(ban|unban|mute|unmute|kick|reply)_\d+$/)) {
             var pp = data.split('_');
             var act = 'pick_' + pp[1];
@@ -475,7 +612,8 @@ bot.on('callback_query', async function(query) {
             if (r3.total === 0) t3 += '\n\n⚠️ لا يوجد مستخدمين.';
             try { await bot.editMessageText(t3, { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: r3.buttons } }); } catch (e) {}
         }
-        // تنقل صفحات
+
+        // ===== تنقل صفحات =====
         else if (data.match(/^do_(ban|unban|mute|unmute|kick|reply)_page_\d+$/)) {
             var pp2 = data.split('_');
             var act2 = 'pick_' + pp2[1];
@@ -485,7 +623,8 @@ bot.on('callback_query', async function(query) {
             var r4 = buildUserButtons(ap2, pg4, filters2[act2]);
             try { await bot.editMessageText('اختر مستخدم:', { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: r4.buttons } }); } catch (e) {}
         }
-        // تنفيذ إجراء (تأكيد)
+
+        // ===== تنفيذ إجراء =====
         else if (data.match(/^do_(ban|unban|mute|unmute|kick)_\d+$/)) {
             var pp3 = data.replace('do_', '').split('_');
             var act3 = pp3[0];
@@ -496,7 +635,8 @@ bot.on('callback_query', async function(query) {
             var cb = [[{ text: '✅ نعم', callback_data: 'confirm_' + act3 + '_' + tid2 }, { text: '❌ لا', callback_data: 'main_menu' }]];
             try { await bot.editMessageText(ct, { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: cb } }); } catch (e) {}
         }
-        // رد على مستخدم
+
+        // ===== رد على مستخدم =====
         else if (data.startsWith('do_reply_')) {
             var tid3 = data.replace('do_reply_', '');
             developerState = { action: 'reply', targetId: tid3 };
@@ -506,7 +646,8 @@ bot.on('callback_query', async function(query) {
             try { await bot.editMessageText(rt, { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: rc } }); } catch (e) {}
         }
         else if (data === 'cancel_reply') { developerState = {}; await sendMainMenu(chatId, msgId); }
-        // تأكيد التنفيذ
+
+        // ===== تأكيد التنفيذ =====
         else if (data.startsWith('confirm_')) {
             var pp4 = data.replace('confirm_', '').split('_');
             var act4 = pp4[0]; var tid4 = pp4[1];
@@ -519,17 +660,20 @@ bot.on('callback_query', async function(query) {
             var bk = [[{ text: '🔙 رجوع', callback_data: 'main_menu' }]];
             try { await bot.editMessageText(result, { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: bk } }); } catch (e) {}
         }
-        // أزرار سريعة
+
+        // ===== أزرار سريعة =====
         else if (data.startsWith('quick_reply_')) { var tid5 = data.replace('quick_reply_', ''); developerState = { action: 'reply', targetId: tid5 }; var u4 = usersData[tid5]; await bot.sendMessage(chatId, '💬 *رد على: ' + (u4 ? getUserDisplayName(u4) : tid5) + '*\n\n✏️ اكتب رسالتك:', { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '❌ إلغاء', callback_data: 'cancel_reply' }]] } }); }
         else if (data.startsWith('quick_ban_')) { var tid6 = data.replace('quick_ban_', ''); var u5 = usersData[tid6]; await bot.sendMessage(chatId, '🔨 *حظر ' + (u5 ? u5.name : tid6) + '؟*', { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ نعم', callback_data: 'confirm_ban_' + tid6 }, { text: '❌ لا', callback_data: 'main_menu' }]] } }); }
         else if (data.startsWith('quick_mute_')) { var tid7 = data.replace('quick_mute_', ''); var u6 = usersData[tid7]; await bot.sendMessage(chatId, '🔇 *كتم ' + (u6 ? u6.name : tid7) + '؟*', { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ نعم', callback_data: 'confirm_mute_' + tid7 }, { text: '❌ لا', callback_data: 'main_menu' }]] } }); }
-        // رسالة جماعية
+
+        // ===== رسالة جماعية =====
         else if (data === 'start_broadcast') {
             developerState = { action: 'broadcast' };
             var bc = '📢 *رسالة جماعية*\n\n✏️ اكتب رسالتك وسترسل لـ ' + Object.values(usersData).filter(function(u) { return !u.banned; }).length + ' مستخدم:';
             try { await bot.editMessageText(bc, { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '❌ إلغاء', callback_data: 'cancel_reply' }]] } }); } catch (e) {}
         }
-        // إحصائيات
+
+        // ===== إحصائيات =====
         else if (data === 'stats') {
             var st = Object.keys(usersData).length;
             var sb = Object.values(usersData).filter(function(u) { return u.banned; }).length;
@@ -539,7 +683,8 @@ bot.on('callback_query', async function(query) {
             var sw = Date.now() - 604800000;
             var sad = Object.values(usersData).filter(function(u) { return u.last_seen > sd; }).length;
             var saw = Object.values(usersData).filter(function(u) { return u.last_seen > sw; }).length;
-            var stxt = '📈 *إحصائيات*\n\n👥 الكل: ' + st + '\n🟢 اليوم: ' + sad + '\n🔵 الأسبوع: ' + saw + '\n🚫 محظور: ' + sb + '\n🔇 مكتوم: ' + sm + '\n💬 رسائل: ' + stm;
+            var totalChats = Object.keys(chatsData).filter(function(k) { return chatsData[k] && chatsData[k].length > 0; }).length;
+            var stxt = '📈 *إحصائيات*\n\n👥 الكل: ' + st + '\n🟢 اليوم: ' + sad + '\n🔵 الأسبوع: ' + saw + '\n🚫 محظور: ' + sb + '\n🔇 مكتوم: ' + sm + '\n💬 رسائل: ' + stm + '\n📖 محادثات محفوظة: ' + totalChats;
             try { await bot.editMessageText(stxt, { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🔙 رجوع', callback_data: 'main_menu' }]] } }); } catch (e) {}
         }
     } catch (err) {
@@ -556,12 +701,8 @@ bot.on('message', async function(msg) {
 
     if (msg.text && msg.text.startsWith('/')) return;
 
-    updateUserData(userId, userName, fullName);
-    var user = usersData[userId];
-
     // ===== المطور =====
     if (chatId.toString() === developerId) {
-        // وضع الرد
         if (developerState.action === 'reply' && developerState.targetId) {
             var target = developerState.targetId;
             developerState = {};
@@ -571,7 +712,6 @@ bot.on('message', async function(msg) {
             } catch (err) { await bot.sendMessage(chatId, '❌ فشل: ' + err.message); }
             return;
         }
-        // رسالة جماعية
         if (developerState.action === 'broadcast') {
             developerState = {};
             var all = Object.values(usersData).filter(function(u) { return !u.banned && u.id; });
@@ -583,7 +723,6 @@ bot.on('message', async function(msg) {
             await bot.sendMessage(chatId, '✅ تم! نجح: ' + ok + ' | فشل: ' + fail, { reply_markup: { inline_keyboard: [[{ text: '🔙 رجوع', callback_data: 'main_menu' }]] } });
             return;
         }
-        // رد ذكي
         if (msg.reply_to_message) {
             var ot = msg.reply_to_message.text || msg.reply_to_message.caption || '';
             var im = ot.match(/🆔 ID:\s*`?(\d+)`?/);
@@ -594,6 +733,9 @@ bot.on('message', async function(msg) {
     }
 
     // ===== المستخدم العادي =====
+    updateUserData(userId, userName, fullName);
+    var user = usersData[userId];
+
     if (user && user.banned) { await bot.sendMessage(chatId, '⛔ أنت محظور.'); return; }
     if (user && user.muted) return;
 
@@ -645,19 +787,23 @@ bot.on('message', async function(msg) {
 
         // صوت
         if (msg.voice || msg.audio) {
-            await bot.sendMessage(chatId, '🎵 استلمت الملف الصوتي. حالياً أقدر أساعدك بالنصوص والصور. أرسل لي سؤالك كتابة وبأجاوبك!');
+            await bot.sendChatAction(chatId, 'typing');
+            var voiceReply = await chatWithGPT(chatId, 'المستخدم أرسل رسالة صوتية. رد عليه بشكل لطيف وأخبره أنك تسمع فقط النصوص حالياً وادعه لكتابة سؤاله.', false);
+            await bot.sendMessage(chatId, voiceReply);
             return;
         }
 
         // فيديو
         if (msg.video || msg.video_note || msg.animation) {
-            await bot.sendMessage(chatId, '🎬 استلمت الفيديو. حالياً أقدر أساعدك بالنصوص والصور. لو عندك سؤال عن الفيديو اكتبه وبأجاوبك!');
+            await bot.sendChatAction(chatId, 'typing');
+            var videoReply = await chatWithGPT(chatId, 'المستخدم أرسل فيديو. رد عليه بشكل لطيف وأخبره أنك تحلل النصوص والصور حالياً وادعه لكتابة سؤاله.', false);
+            await bot.sendMessage(chatId, videoReply);
             return;
         }
 
         // ملصق
         if (msg.sticker) {
-            var stickerReply = await chatWithGPT(chatId, 'المستخدم أرسل ملصق (ستيكر) بإيموجي: ' + (msg.sticker.emoji || '😊') + '. رد عليه بشكل لطيف ومرح.');
+            var stickerReply = await chatWithGPT(chatId, 'المستخدم أرسل ملصق (ستيكر) بإيموجي: ' + (msg.sticker.emoji || '😊') + '. رد عليه بشكل لطيف ومرح.', false);
             await bot.sendMessage(chatId, stickerReply);
             return;
         }
@@ -695,28 +841,27 @@ bot.on('message', async function(msg) {
                 }
                 await bot.sendChatAction(chatId, 'typing');
                 await bot.sendMessage(chatId, '🧠 جاري التفكير العميق... ⏳');
-                var deepPrompt = 'أريدك تفكر بعمق وبشكل تحليلي في هذا الموضوع. قدم تحليل شامل من عدة زوايا مع أمثلة وأدلة. فكر خطوة بخطوة:\n\n' + thinkPrompt;
-                var thinkReply = await chatWithGPT(chatId, deepPrompt);
+                var thinkReply = await chatWithGPT(chatId, thinkPrompt, true);
                 await sendLongReply(chatId, '🧠 *التفكير العميق:*\n\n' + thinkReply, msg.message_id);
                 return;
             }
 
-            // محادثة عادية
+            // محادثة عادية - دائماً يرد
             await bot.sendChatAction(chatId, 'typing');
-            var reply = await chatWithGPT(chatId, text);
+            var reply = await chatWithGPT(chatId, text, false);
             await sendLongReply(chatId, reply, msg.message_id);
         }
+
+        // إذا لم يكن هناك نص ولا وسائط معروفة، رد عام
+        if (!msg.text && !msg.photo && !msg.document && !msg.voice && !msg.audio && !msg.video && !msg.video_note && !msg.animation && !msg.sticker) {
+            await bot.sendChatAction(chatId, 'typing');
+            var generalReply = await chatWithGPT(chatId, 'المستخدم أرسل شيئاً لم أتعرف عليه. رد عليه بشكل لطيف وادعه لإرسال نص أو صورة.', false);
+            await bot.sendMessage(chatId, generalReply);
+        }
+
     } catch (err) {
         console.error('خطأ AI:', err);
         await bot.sendMessage(chatId, '⚠️ حدث خطأ. حاول مرة ثانية.');
-    }
-
-    // رسالة ترحيب (أول مرة أو بعد 3 ساعات)
-    var now = Date.now();
-    var lastR = user.last_reminder || 0;
-    if (lastR === 0) {
-        usersData[userId].last_reminder = now;
-        saveUsersData();
     }
 });
 

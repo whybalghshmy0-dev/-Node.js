@@ -6,7 +6,7 @@ const http = require('http');
 
 // ===== إعدادات البوت =====
 var BOT_TOKEN = '8798272294:AAEY_LIYnVRIY2T-WUP63duCn5V7VFgGsCE';
-var OPENAI_API_KEY = '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';
+var OPENAI_API_KEY = process.env.OPENAI_API_KEY || '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';
 var developerId = '7411444902';
 
 // ===== إعدادات قاعدة البيانات =====
@@ -291,22 +291,19 @@ async function chatWithGPT(userId, userMessage, deepThink) {
 
     try {
         var response = await callOpenAI('/v1/chat/completions', {
-            model: 'gpt-4o',
+            model: 'gpt-4o-mini',
             messages: messages,
             max_tokens: 4096,
             temperature: deepThink ? 0.9 : 0.7
         });
 
         if (response.error) {
-            if (response.error.code === 'model_not_found' || response.error.type === 'invalid_request_error') {
-                response = await callOpenAI('/v1/chat/completions', {
-                    model: 'gpt-4o-mini',
-                    messages: messages,
-                    max_tokens: 4096,
-                    temperature: deepThink ? 0.9 : 0.7
-                });
+            var errMsg = response.error.message || JSON.stringify(response.error);
+            console.error('OpenAI error:', errMsg);
+            if (response.error.code === 'invalid_api_key' || response.error.type === 'invalid_request_error') {
+                return '⚠️ مفتاح API غير صحيح. يرجى التواصل مع الدعم.';
             }
-            if (response.error) return '⚠️ حدث خطأ في الاتصال. حاول مرة ثانية.';
+            return '⚠️ حدث خطأ في الاتصال. حاول مرة ثانية.';
         }
 
         var reply = response.choices[0].message.content;
@@ -339,10 +336,10 @@ async function analyzeImage(userId, fileId, caption) {
     messages.push({ role: 'user', content: userContent });
 
     try {
-        var response = await callOpenAI('/v1/chat/completions', { model: 'gpt-4o', messages: messages, max_tokens: 4096 });
+        var response = await callOpenAI('/v1/chat/completions', { model: 'gpt-4o-mini', messages: messages, max_tokens: 4096 });
         if (response.error) {
-            response = await callOpenAI('/v1/chat/completions', { model: 'gpt-4o-mini', messages: messages, max_tokens: 4096 });
-            if (response.error) return '⚠️ خطأ في تحليل الصورة.';
+            console.error('analyzeImage error:', response.error.message);
+            return '⚠️ خطأ في تحليل الصورة.';
         }
         var reply = response.choices[0].message.content;
         await addToHistory(userId, 'assistant', reply);
@@ -355,8 +352,9 @@ async function analyzeImage(userId, fileId, caption) {
 // ===== دالة إنشاء صور =====
 async function generateImage(userId, prompt) {
     try {
-        var response = await callOpenAI('/v1/images/generations', { model: 'dall-e-3', prompt: prompt, n: 1, size: '1024x1024', quality: 'hd' });
+        var response = await callOpenAI('/v1/images/generations', { model: 'dall-e-3', prompt: prompt, n: 1, size: '1024x1024', quality: 'standard' });
         if (response.error) {
+            console.error('generateImage dall-e-3 error:', response.error.message);
             response = await callOpenAI('/v1/images/generations', { model: 'dall-e-2', prompt: prompt, n: 1, size: '1024x1024' });
             if (response.error) return { error: response.error.message || 'فشل إنشاء الصورة' };
         }

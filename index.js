@@ -290,20 +290,37 @@ async function chatWithGPT(userId, userMessage, deepThink) {
     messages.push({ role: 'user', content: userMessage });
 
     try {
-        var response = await callOpenAI('/v1/chat/completions', {
-            model: 'gpt-4o-mini',
-            messages: messages,
-            max_tokens: 4096,
-            temperature: deepThink ? 0.9 : 0.7
-        });
+        // نجرب gpt-4o-mini أولاً، وإذا فشل نجرب gpt-3.5-turbo
+        var modelsToTry = ['gpt-4o-mini', 'gpt-3.5-turbo'];
+        var response = null;
+        var lastErr = null;
+        for (var mi = 0; mi < modelsToTry.length; mi++) {
+            try {
+                response = await callOpenAI('/v1/chat/completions', {
+                    model: modelsToTry[mi],
+                    messages: messages,
+                    max_tokens: 4096,
+                    temperature: deepThink ? 0.9 : 0.7
+                });
+                if (!response.error) break; // نجح
+                lastErr = response.error.message || JSON.stringify(response.error);
+                console.error('OpenAI model ' + modelsToTry[mi] + ' error:', lastErr);
+            } catch (e) {
+                lastErr = e.message;
+                console.error('OpenAI model ' + modelsToTry[mi] + ' exception:', lastErr);
+            }
+        }
 
-        if (response.error) {
-            var errMsg = response.error.message || JSON.stringify(response.error);
-            console.error('OpenAI error:', errMsg);
-            if (response.error.code === 'invalid_api_key' || response.error.type === 'invalid_request_error') {
+        if (!response || response.error) {
+            var errMsg = lastErr || 'خطأ غير معروف';
+            console.error('OpenAI final error:', errMsg);
+            if (errMsg.indexOf('invalid_api_key') !== -1 || errMsg.indexOf('Incorrect API key') !== -1) {
                 return '⚠️ مفتاح API غير صحيح. يرجى التواصل مع الدعم.';
             }
-            return '⚠️ حدث خطأ في الاتصال. حاول مرة ثانية.';
+            if (errMsg.indexOf('quota') !== -1 || errMsg.indexOf('billing') !== -1 || errMsg.indexOf('insufficient_quota') !== -1) {
+                return '⚠️ تم استنفاد رصيد API. يرجى التواصل مع الدعم.';
+            }
+            return '⚠️ حدث خطأ مؤقت في الاتصال. حاول مرة ثانية بعد لحظات.';
         }
 
         var reply = response.choices[0].message.content;
@@ -902,9 +919,24 @@ async function startBot() {
 
 // ===== Express =====
 var app = express();
-app.get('/', function(req, res) { res.send('Bot is running!'); });
+app.get('/', function(req, res) { res.send('Bot is running! 🤖'); });
+app.get('/health', function(req, res) { res.json({ status: 'ok', time: new Date().toISOString() }); });
 var port = process.env.PORT || 3000;
-app.listen(port, function() { console.log('✅ Port ' + port); });
+var serverUrl = process.env.RENDER_EXTERNAL_URL || ('http://localhost:' + port);
+app.listen(port, function() {
+    console.log('✅ Port ' + port);
+    // ===== Keep-Alive: منع الخمول على Render المجاني =====
+    // يرسل ping لنفسه كل 14 دقيقة لمنع الإيقاف بعد 50 ثانية من عدم النشاط
+    setInterval(function() {
+        var url = serverUrl + '/health';
+        var protocol = url.startsWith('https') ? https : http;
+        protocol.get(url, function(res) {
+            console.log('🔄 Keep-alive ping: ' + res.statusCode);
+        }).on('error', function(e) {
+            console.log('⚠️ Keep-alive error: ' + e.message);
+        });
+    }, 14 * 60 * 1000); // كل 14 دقيقة
+});
 
 // ===== تشغيل كل شيء =====
 startBot().catch(function(e) {

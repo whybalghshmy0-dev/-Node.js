@@ -1,6 +1,6 @@
 // ======================
-// بوت تواصل مباشر بين المستخدمين
-// نظام محادثات خاصة + لوحة تحكم للمطور
+// بوت تواصل عام (بث)
+// نظام بث عام بين المستخدمين + لوحة تحكم للمطور
 // ======================
 
 const TelegramBot = require('node-telegram-bot-api');
@@ -64,17 +64,15 @@ async function initDB() {
             ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
         `);
 
-        // جدول المحادثات المباشرة بين المستخدمين
+        // جدول البث العام
         await conn.execute(`
-            CREATE TABLE IF NOT EXISTS direct_messages (
+            CREATE TABLE IF NOT EXISTS broadcasts (
                 id INT AUTO_INCREMENT PRIMARY KEY,
-                from_user_id VARCHAR(50) NOT NULL,
-                to_user_id VARCHAR(50) NOT NULL,
+                sender_id VARCHAR(50) NOT NULL,
+                sender_name VARCHAR(500) NOT NULL,
                 content TEXT NOT NULL,
-                ts BIGINT DEFAULT 0,
-                is_read TINYINT(1) DEFAULT 0,
-                INDEX idx_from_to (from_user_id, to_user_id),
-                INDEX idx_to (to_user_id),
+                ts BIGINT NOT NULL,
+                INDEX idx_sender (sender_id),
                 INDEX idx_ts (ts)
             ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
         `);
@@ -165,33 +163,18 @@ async function setUserField(userId, field, value) {
 
 async function deleteUser(userId) {
     await query('DELETE FROM users WHERE id=?', [String(userId)]);
-    await query('DELETE FROM direct_messages WHERE from_user_id=? OR to_user_id=?', [String(userId), String(userId)]);
 }
 
-// ===== دوال المحادثات المباشرة =====
-async function sendDirectMessage(fromUserId, toUserId, content) {
+// ===== دوال البث العام =====
+async function createBroadcast(senderId, senderName, content) {
     const now = Date.now();
-    const res = await query('INSERT INTO direct_messages (from_user_id, to_user_id, content, ts) VALUES (?, ?, ?, ?)',
-        [String(fromUserId), String(toUserId), content, now]);
+    const res = await query('INSERT INTO broadcasts (sender_id, sender_name, content, ts) VALUES (?, ?, ?, ?)',
+        [String(senderId), senderName, content, now]);
     return res.insertId;
 }
 
-async function getDirectMessages(userId1, userId2, limit = 50) {
-    return await query(
-        `SELECT * FROM direct_messages WHERE 
-        (from_user_id=? AND to_user_id=?) OR (from_user_id=? AND to_user_id=?)
-        ORDER BY ts ASC LIMIT ?`,
-        [String(userId1), String(userId2), String(userId2), String(userId1), limit]
-    );
-}
-
-async function getUnreadMessagesCount(toUserId) {
-    const rows = await query('SELECT COUNT(*) as cnt FROM direct_messages WHERE to_user_id=? AND is_read=0', [String(toUserId)]);
-    return rows[0].cnt;
-}
-
-async function markMessagesAsRead(fromUserId, toUserId) {
-    await query('UPDATE direct_messages SET is_read=1 WHERE from_user_id=? AND to_user_id=?', [String(fromUserId), String(toUserId)]);
+async function getBroadcasts(limit = 50) {
+    return await query('SELECT * FROM broadcasts ORDER BY ts DESC LIMIT ?', [limit]);
 }
 
 // ===== دوال المجموعات =====
@@ -254,22 +237,24 @@ function getUserDisplayName(user) {
 }
 
 // ===== الرسائل الترحيبية =====
-const USER_WELCOME = `🤖 *مرحباً بك في بوت التواصل المباشر!*
+const USER_WELCOME = `🤖 *مرحباً بك في بوت التواصل العام!*
 
-يمكنك التواصل مباشرة مع المستخدمين الآخرين:
+يمكنك استخدام البوت للأغراض التالية:
 
-📱 *ابدأ محادثة*: اختر مستخدم وابدأ الحوار
-💬 *رسائلك*: عرض المحادثات النشطة
-👥 *المستخدمين*: قائمة جميع المستخدمين
+📢 *مراسلة الجميع*: أرسل رسالتك وستصل لكل الأعضاء باسمك
+💬 *عرض آخر الرسائل*: شاهد آخر الرسائل المرسلة
+👥 *المجموعات*: عرض المجموعات التي فيها البوت
 🔍 *معرفة الـIP الخاص بي*
-🗑️ *مسح محادثاتك*
+🗑️ *مسح محادثتك* مع البوت
+
+للمطور فقط: لوحة تحكم كاملة عبر /start.
 `;
 
 const USER_BUTTONS = {
     inline_keyboard: [
-        [{ text: '📱 ابدأ محادثة', callback_data: 'start_chat' }, { text: '💬 رسائلي', callback_data: 'my_chats' }],
-        [{ text: '👥 المستخدمين', callback_data: 'list_users_chat' }, { text: '🔍 IP الخاص بي', callback_data: 'user_myip' }],
-        [{ text: '🗑️ مسح محادثاتي', callback_data: 'clear_all_chats' }]
+        [{ text: '📢 مراسلة الجميع', callback_data: 'user_broadcast' }],
+        [{ text: '💬 آخر الرسائل', callback_data: 'view_broadcasts' }],
+        [{ text: '👥 المجموعات', callback_data: 'user_groups' }, { text: '🔍 IP الخاص بي', callback_data: 'user_myip' }]
     ]
 };
 
@@ -280,34 +265,48 @@ let developerState = {};
 async function startBot() {
     await createPool();
     bot = new TelegramBot(BOT_TOKEN, { polling: true });
-    console.log('🤖 Bot started (direct messaging bot)');
+    console.log('🤖 Bot started (broadcast bot)');
 
     // أوامر البوت
     await bot.setMyCommands([
         { command: 'start', description: '🏠 الرئيسية' },
         { command: 'help', description: '❓ المساعدة' },
-        { command: 'chat', description: '💬 ابدأ محادثة' },
+        { command: 'broadcast', description: '📢 مراسلة الجميع' },
         { command: 'myip', description: '🔍 عرض IP الخاص بك' },
-        { command: 'clear', description: '🗑️ مسح محادثاتك' }
+        { command: 'groups', description: '👥 المجموعات' }
     ]);
 
     // ===== معالج الأوامر =====
     bot.onText(/^\/(start|panel)$/, async (msg) => {
         const chatId = msg.chat.id;
         const userId = msg.from.id;
+        const fullName = ((msg.from.first_name || '') + ' ' + (msg.from.last_name || '')).trim();
+        const ip = getUserIp(msg);
+        
+        // تحديث بيانات المستخدم أولاً
+        await updateUserData(userId, msg.from.username, fullName, ip);
+
+        // التحقق من أنه المطور
         if (chatId.toString() === DEVELOPER_ID || userId.toString() === DEVELOPER_ID) {
             await sendMainMenu(chatId);
             return;
         }
-        const fullName = ((msg.from.first_name || '') + ' ' + (msg.from.last_name || '')).trim();
-        const ip = getUserIp(msg);
-        await updateUserData(userId, msg.from.username, fullName, ip);
+
+        // إذا لم يكن المطور، عرض الترحيب العادي
         await bot.sendMessage(chatId, USER_WELCOME, { parse_mode: 'Markdown', reply_markup: USER_BUTTONS });
     });
 
     bot.onText(/^\/help$/, async (msg) => {
         const chatId = msg.chat.id;
         await bot.sendMessage(chatId, USER_WELCOME, { parse_mode: 'Markdown', reply_markup: USER_BUTTONS });
+    });
+
+    bot.onText(/^\/broadcast$/, async (msg) => {
+        const userId = msg.from.id;
+        const user = await getUser(userId);
+        if (user && user.banned) return bot.sendMessage(msg.chat.id, '⛔ أنت محظور.');
+        userState.set(userId, { action: 'broadcast' });
+        await bot.sendMessage(msg.chat.id, '📢 *وضع مراسلة الجميع*\n\nأرسل الآن الرسالة التي تريد نشرها لكل الأعضاء.\n(لإلغاء اكتب /cancel)', { parse_mode: 'Markdown' });
     });
 
     bot.onText(/^\/myip$/, async (msg) => {
@@ -317,11 +316,28 @@ async function startBot() {
         await bot.sendMessage(msg.chat.id, `🔍 *عنوان IP الخاص بك:*\n\`${ip}\``, { parse_mode: 'Markdown' });
     });
 
-    bot.onText(/^\/clear$/, async (msg) => {
+    bot.onText(/^\/groups$/, async (msg) => {
         const chatId = msg.chat.id;
+        const groups = await getAllGroups();
+        if (groups.length === 0) {
+            await bot.sendMessage(chatId, '📭 البوت ليس مضافاً إلى أي مجموعة بعد.');
+            return;
+        }
+        let text = '👥 *المجموعات التي فيها البوت:*\n\n';
+        for (const g of groups) {
+            text += `📌 ${g.title || 'بدون عنوان'} (ID: \`${g.id}\`)\n👥 الأعضاء: ${g.members_count || '?'}\n\n`;
+        }
+        await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+    });
+
+    bot.onText(/^\/cancel$/, async (msg) => {
         const userId = msg.from.id;
-        await query('DELETE FROM direct_messages WHERE from_user_id=? OR to_user_id=?', [String(userId), String(userId)]);
-        await bot.sendMessage(chatId, '🗑️ تم مسح جميع محادثاتك.');
+        if (userState.has(userId)) {
+            userState.delete(userId);
+            await bot.sendMessage(msg.chat.id, '❌ تم إلغاء الوضع الحالي.');
+        } else {
+            await bot.sendMessage(msg.chat.id, '⚠️ ليس لديك وضع نشط.');
+        }
     });
 
     // ===== معالج الأزرار =====
@@ -333,122 +349,37 @@ async function startBot() {
         await bot.answerCallbackQuery(query.id);
 
         // أزرار المستخدم العادي
-        if (data === 'start_chat') {
-            userState.set(userId, { action: 'select_user' });
-            const allUsers = await getAllUsers();
-            const otherUsers = allUsers.filter(u => u.id !== String(userId));
-            
-            if (otherUsers.length === 0) {
-                await bot.sendMessage(chatId, '📭 لا يوجد مستخدمين آخرين حالياً.');
+        if (data === 'user_broadcast') {
+            userState.set(userId, { action: 'broadcast' });
+            await bot.sendMessage(chatId, '📢 *وضع مراسلة الجميع*\n\nأرسل الآن الرسالة التي تريد نشرها.', { parse_mode: 'Markdown' });
+            return;
+        }
+
+        if (data === 'view_broadcasts') {
+            const broadcasts = await getBroadcasts(10);
+            if (broadcasts.length === 0) {
+                await bot.sendMessage(chatId, '📭 لا يوجد رسائل بعد.');
                 return;
             }
-
-            const buttons = [];
-            for (const u of otherUsers.slice(0, 10)) {
-                buttons.push([{ text: `👤 ${u.name || u.username || u.id}`, callback_data: `chat_with_${u.id}` }]);
+            let text = '📢 *آخر الرسائل:*\n\n';
+            for (const b of broadcasts) {
+                text += `👤 من: ${b.sender_name}\n📝 ${b.content.substring(0, 100)}${b.content.length > 100 ? '...' : ''}\n🕒 ${formatTime(b.ts)}\n\n─────────────────\n`;
             }
-            buttons.push([{ text: '🔙 رجوع', callback_data: 'back_to_menu' }]);
-            
-            await bot.editMessageText('👥 *اختر المستخدم الذي تريد التحدث معه:*', {
-                chat_id: chatId,
-                message_id: msgId,
-                parse_mode: 'Markdown',
-                reply_markup: { inline_keyboard: buttons }
-            });
+            await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
             return;
         }
 
-        if (data.startsWith('chat_with_')) {
-            const targetUserId = data.replace('chat_with_', '');
-            userState.set(userId, { action: 'in_chat', targetUserId: targetUserId });
-            
-            const targetUser = await getUser(targetUserId);
-            const targetName = targetUser ? getUserDisplayName(targetUser) : targetUserId;
-            
-            await bot.editMessageText(`💬 *محادثة مع ${targetName}*\n\nاكتب رسالتك الآن:`, {
-                chat_id: chatId,
-                message_id: msgId,
-                parse_mode: 'Markdown',
-                reply_markup: { inline_keyboard: [[{ text: '❌ إنهاء المحادثة', callback_data: 'back_to_menu' }]] }
-            });
-            return;
-        }
-
-        if (data === 'my_chats') {
-            const messages = await query(
-                `SELECT DISTINCT from_user_id, to_user_id FROM direct_messages 
-                WHERE from_user_id=? OR to_user_id=? ORDER BY ts DESC`,
-                [String(userId), String(userId)]
-            );
-
-            const conversations = new Set();
-            for (const msg of messages) {
-                const otherId = msg.from_user_id === String(userId) ? msg.to_user_id : msg.from_user_id;
-                conversations.add(otherId);
-            }
-
-            if (conversations.size === 0) {
-                await bot.editMessageText('📭 لا توجد محادثات بعد.', {
-                    chat_id: chatId,
-                    message_id: msgId,
-                    reply_markup: { inline_keyboard: [[{ text: '🔙 رجوع', callback_data: 'back_to_menu' }]] }
-                });
+        if (data === 'user_groups') {
+            const groups = await getAllGroups();
+            if (groups.length === 0) {
+                await bot.sendMessage(chatId, '📭 البوت ليس مضافاً إلى أي مجموعة.');
                 return;
             }
-
-            const buttons = [];
-            for (const otherId of Array.from(conversations).slice(0, 10)) {
-                const otherUser = await getUser(otherId);
-                const unread = await query('SELECT COUNT(*) as cnt FROM direct_messages WHERE from_user_id=? AND to_user_id=? AND is_read=0', [otherId, String(userId)]);
-                const unreadCount = unread[0].cnt;
-                const label = `👤 ${otherUser ? getUserDisplayName(otherUser) : otherId}${unreadCount > 0 ? ` (${unreadCount} جديد)` : ''}`;
-                buttons.push([{ text: label, callback_data: `open_chat_${otherId}` }]);
+            let text = '👥 *المجموعات:*\n\n';
+            for (const g of groups) {
+                text += `📌 ${g.title || 'بدون عنوان'} (ID: \`${g.id}\`)\n👥 ${g.members_count || '?'} عضو\n\n`;
             }
-            buttons.push([{ text: '🔙 رجوع', callback_data: 'back_to_menu' }]);
-
-            await bot.editMessageText('💬 *محادثاتك:*', {
-                chat_id: chatId,
-                message_id: msgId,
-                parse_mode: 'Markdown',
-                reply_markup: { inline_keyboard: buttons }
-            });
-            return;
-        }
-
-        if (data.startsWith('open_chat_')) {
-            const targetUserId = data.replace('open_chat_', '');
-            userState.set(userId, { action: 'in_chat', targetUserId: targetUserId });
-            
-            const targetUser = await getUser(targetUserId);
-            const targetName = targetUser ? getUserDisplayName(targetUser) : targetUserId;
-            
-            await markMessagesAsRead(targetUserId, String(userId));
-            
-            await bot.editMessageText(`💬 *محادثة مع ${targetName}*\n\nاكتب رسالتك:`, {
-                chat_id: chatId,
-                message_id: msgId,
-                parse_mode: 'Markdown',
-                reply_markup: { inline_keyboard: [[{ text: '❌ إنهاء المحادثة', callback_data: 'back_to_menu' }]] }
-            });
-            return;
-        }
-
-        if (data === 'list_users_chat') {
-            const allUsers = await getAllUsers();
-            const buttons = [];
-            for (const u of allUsers.slice(0, 15)) {
-                if (u.id !== String(userId)) {
-                    buttons.push([{ text: `👤 ${u.name || u.username || u.id}`, callback_data: `chat_with_${u.id}` }]);
-                }
-            }
-            buttons.push([{ text: '🔙 رجوع', callback_data: 'back_to_menu' }]);
-
-            await bot.editMessageText('👥 *المستخدمين:*', {
-                chat_id: chatId,
-                message_id: msgId,
-                parse_mode: 'Markdown',
-                reply_markup: { inline_keyboard: buttons }
-            });
+            await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
             return;
         }
 
@@ -456,23 +387,6 @@ async function startBot() {
             const rows = await query('SELECT ip FROM users WHERE id=?', [String(userId)]);
             const ip = rows.length ? rows[0].ip : 'غير محدد';
             await bot.sendMessage(chatId, `🔍 *IP الخاص بك:*\n\`${ip}\``, { parse_mode: 'Markdown' });
-            return;
-        }
-
-        if (data === 'clear_all_chats') {
-            await query('DELETE FROM direct_messages WHERE from_user_id=? OR to_user_id=?', [String(userId), String(userId)]);
-            await bot.sendMessage(chatId, '🗑️ تم مسح جميع محادثاتك.');
-            return;
-        }
-
-        if (data === 'back_to_menu') {
-            userState.delete(userId);
-            await bot.editMessageText(USER_WELCOME, {
-                chat_id: chatId,
-                message_id: msgId,
-                parse_mode: 'Markdown',
-                reply_markup: USER_BUTTONS
-            });
             return;
         }
 
@@ -494,8 +408,11 @@ async function startBot() {
                 await bot.sendMessage(chatId, '❌ غير موجود');
                 return;
             }
-            const dt = `👤 *تفاصيل المستخدم*\n\n📝 ${u.name || '-'}\n🔗 ${u.username ? '@' + u.username : '-'}\n🆔 \`${u.id}\`\n📨 ${u.messages_count || 0} رسالة\n🕒 آخر ظهور: ${formatTime(u.last_seen)}\n🚫 ${u.banned ? 'محظور' : 'لا'}\n🔇 ${u.muted ? 'مكتوم' : 'لا'}`;
+            const dt = `👤 *تفاصيل المستخدم*\n\n📝 ${u.name || '-'}\n🔗 ${u.username ? '@' + u.username : '-'}\n🆔 \`${u.id}\`\n📨 ${u.messages_count || 0} رسالة\n🕒 آخر ظهور: ${formatTime(u.last_seen)}\n🌐 IP: \`${u.ip || 'غير محدد'}\`\n🚫 ${u.banned ? 'محظور' : 'لا'}\n🔇 ${u.muted ? 'مكتوم' : 'لا'}`;
             const buttons = [
+                [{ text: '🚫 حظر', callback_data: `do_ban_${targetId}` }, { text: '✅ رفع حظر', callback_data: `do_unban_${targetId}` }],
+                [{ text: '🔇 كتم', callback_data: `do_mute_${targetId}` }, { text: '🔊 رفع كتم', callback_data: `do_unmute_${targetId}` }],
+                [{ text: '👢 طرد', callback_data: `do_kick_${targetId}` }],
                 [{ text: '🔙 رجوع', callback_data: 'list_users_1' }]
             ];
             await bot.editMessageText(dt, { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } });
@@ -534,6 +451,17 @@ async function startBot() {
                 await bot.sendMessage(targetId, '👢 تم طردك من البوت.');
                 await bot.editMessageText(`✅ تم طرد \`${targetId}\``, { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🔙 رجوع', callback_data: 'main_menu' }]] } });
             }
+        } else if (data === 'broadcasts_list') {
+            const broadcasts = await getBroadcasts(20);
+            if (broadcasts.length === 0) {
+                await bot.editMessageText('📭 لا يوجد بث عام بعد.', { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: [[{ text: '🔙 رجوع', callback_data: 'main_menu' }]] } });
+                return;
+            }
+            let text = '📢 *رسائل البث العام*\n\n';
+            for (const b of broadcasts) {
+                text += `👤 من: ${b.sender_name}\n📝 ${b.content.substring(0, 100)}${b.content.length > 100 ? '...' : ''}\n🕒 ${formatTime(b.ts)}\n\n`;
+            }
+            await bot.editMessageText(text, { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🔙 رجوع', callback_data: 'main_menu' }]] } });
         } else if (data === 'stats') {
             const allUsers = await getAllUsers();
             const total = allUsers.length;
@@ -541,7 +469,8 @@ async function startBot() {
             const muted = allUsers.filter(u => u.muted).length;
             const msgs = allUsers.reduce((s, u) => s + (u.messages_count || 0), 0);
             const groups = await getAllGroups();
-            const statsText = `📈 *إحصائيات البوت*\n\n👥 المستخدمين: ${total}\n🚫 محظور: ${banned}\n🔇 مكتوم: ${muted}\n💬 إجمالي الرسائل: ${msgs}\n👥 المجموعات: ${groups.length}`;
+            const broadcasts = await getBroadcasts(100);
+            const statsText = `📈 *إحصائيات البوت*\n\n👥 المستخدمين: ${total}\n🚫 محظور: ${banned}\n🔇 مكتوم: ${muted}\n💬 إجمالي الرسائل: ${msgs}\n👥 المجموعات: ${groups.length}\n📢 عدد البث العام: ${broadcasts.length}`;
             await bot.editMessageText(statsText, { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🔙 رجوع', callback_data: 'main_menu' }]] } });
         }
     });
@@ -570,32 +499,34 @@ async function startBot() {
             }
         }
 
-        // معالجة حالة المحادثة المباشرة
+        // معالجة حالة البث
         const state = userState.get(userId);
-        if (state && state.action === 'in_chat' && isPrivate) {
-            const targetUserId = state.targetUserId;
-            const targetUser = await getUser(targetUserId);
-            
-            if (!targetUser || targetUser.banned) {
-                await bot.sendMessage(chatId, '❌ المستخدم غير متاح أو تم حظره.');
-                userState.delete(userId);
-                return;
-            }
+        if (state && state.action === 'broadcast' && isPrivate) {
+            const content = text || '📎 مرفق (صورة/ملف)';
+            const user = await getUser(userId);
+            const senderName = user ? (user.name || user.username || user.id) : userId;
 
-            // إرسال الرسالة للمستخدم الآخر
-            try {
-                await sendDirectMessage(userId, targetUserId, text);
-                await bot.sendMessage(targetUserId, `💬 *رسالة جديدة من ${getUserDisplayName(await getUser(userId))}:*\n\n${text}`, { parse_mode: 'Markdown' });
-                await bot.sendMessage(chatId, '✅ تم إرسال الرسالة.');
-            } catch (e) {
-                await bot.sendMessage(chatId, `❌ فشل الإرسال: ${e.message}`);
+            // إنشاء البث
+            await createBroadcast(userId, senderName, content);
+
+            // إرسال البث لجميع المستخدمين
+            const allUsers = await getAllUsers();
+            let sent = 0;
+            for (const u of allUsers) {
+                if (u.banned || u.id === String(userId)) continue;
+                try {
+                    await bot.sendMessage(u.id, `📢 *رسالة عامة من ${senderName}:*\n\n${content}`, { parse_mode: 'Markdown' });
+                    sent++;
+                } catch (e) { console.error(`فشل إرسال البث للمستخدم ${u.id}:`, e.message); }
             }
+            await bot.sendMessage(chatId, `✅ تم إرسال رسالتك إلى ${sent} مستخدم.`);
+            userState.delete(userId);
             return;
         }
 
         // رسالة عادية
         if (isPrivate && text && !state) {
-            await bot.sendMessage(chatId, '📨 تم استلام رسالتك. استخدم الأزرار للتواصل مع المستخدمين الآخرين.');
+            await bot.sendMessage(chatId, '📨 تم استلام رسالتك. استخدم الأزرار للمراسلة أو أرسل /broadcast للبث العام.');
         }
     });
 
@@ -610,13 +541,13 @@ async function startBot() {
                     const adminsJson = JSON.stringify(admins.map(a => ({ id: a.user.id, first_name: a.user.first_name, last_name: a.user.last_name })));
                     const memberCount = await bot.getChatMembersCount(chatId);
                     await addOrUpdateGroup(chatId, title, memberCount, adminsJson);
-                    await bot.sendMessage(chatId, '🤖 مرحباً! تم إضافة البوت. يمكنكم التواصل المباشر بين المستخدمين.');
+                    await bot.sendMessage(chatId, '🤖 مرحباً! تم إضافة البوت. يمكنكم التواصل العام بين الأعضاء.');
                 } catch (e) { console.error('خطأ في جلب معلومات المجموعة:', e.message); }
             }
         }
     });
 
-    console.log('✅ البوت جاهز للتواصل المباشر بين المستخدمين');
+    console.log('✅ البوت جاهز للبث العام');
 }
 
 // ===== دوال لوحة التحكم =====
@@ -647,9 +578,11 @@ async function sendMainMenu(chatId, msgId = null) {
     const banned = allUsers.filter(u => u.banned).length;
     const muted = allUsers.filter(u => u.muted).length;
     const groups = await getAllGroups();
-    const text = `🎛️ *لوحة التحكم*\n\n📊 الإحصائيات:\n👥 المستخدمين: ${total}\n🚫 محظور: ${banned}\n🔇 مكتوم: ${muted}\n👥 المجموعات: ${groups.length}`;
+    const broadcasts = await getBroadcasts(100);
+    const text = `🎛️ *لوحة التحكم*\n\n📊 الإحصائيات:\n👥 المستخدمين: ${total}\n🚫 محظور: ${banned}\n🔇 مكتوم: ${muted}\n👥 المجموعات: ${groups.length}\n📢 البث العام: ${broadcasts.length}`;
     const buttons = [
         [{ text: '👥 المستخدمين', callback_data: 'list_users_1' }],
+        [{ text: '📢 البث العام', callback_data: 'broadcasts_list' }],
         [{ text: '📈 الإحصائيات', callback_data: 'stats' }]
     ];
     if (msgId) {
@@ -661,7 +594,7 @@ async function sendMainMenu(chatId, msgId = null) {
 
 // ===== Express server مع keep-alive =====
 const app = express();
-app.get('/', (req, res) => res.send('Direct messaging bot running!'));
+app.get('/', (req, res) => res.send('Broadcast bot running!'));
 app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
 const port = process.env.PORT || 3000;
 const serverUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${port}`;

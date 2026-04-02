@@ -48,6 +48,7 @@ async function initDB() {
                 id VARCHAR(50) PRIMARY KEY,
                 username VARCHAR(255) DEFAULT '',
                 name VARCHAR(500) DEFAULT '',
+                nickname VARCHAR(255) DEFAULT NULL,
                 first_seen BIGINT DEFAULT 0,
                 last_seen BIGINT DEFAULT 0,
                 messages_count INT DEFAULT 0,
@@ -55,6 +56,8 @@ async function initDB() {
                 muted TINYINT(1) DEFAULT 0
             ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
         `);
+        // إضافة عمود nickname إذا لم يكن موجوداً (للقواعد القديمة)
+        try { await conn.execute('ALTER TABLE users ADD COLUMN nickname VARCHAR(255) DEFAULT NULL'); } catch(e) {}
 
         // جدول الرسائل العامة (المجتمع)
         await conn.execute(`
@@ -221,13 +224,86 @@ function getUserDisplayName(u) {
     return n;
 }
 
-// بناء بصمة المرسل (اسم مستعار مبني على ID بدون كشف هوية)
-function getSenderAlias(senderId, senderName) {
-    // نعرض الاسم الأول فقط + آخر رقمين من الـ ID كبصمة
+// بناء اسم العرض للمرسل
+function getSenderAlias(senderId, senderName, nickname) {
+    if (nickname && nickname.trim()) return nickname.trim();
+    // fallback: الاسم الأول + آخر رقمين
     var firstName = (senderName || 'عضو').split(' ')[0];
     var idStr = String(senderId);
     var suffix = idStr.slice(-2);
     return firstName + '#' + suffix;
+}
+
+// التحقق من تكرار الاسم المستعار
+async function isNicknameTaken(nickname, excludeUserId) {
+    try {
+        var rows = await query(
+            'SELECT id FROM users WHERE LOWER(nickname)=LOWER(?) AND id!=?',
+            [nickname.trim(), String(excludeUserId)]
+        );
+        return rows.length > 0;
+    } catch(e) { return false; }
+}
+
+// ===== طلب الاسم المستعار =====
+async function askForNickname(chatId, userId, isFirst, editMsgId) {
+    pendingNickname[chatId] = true;
+    var text = isFirst
+        ? '🌟 *أهلاً بك!*\n\n'
+          + 'قبل البدء، اختر اسماً مستعاراً سيظهر للجميع عند مراسلتك:\n\n'
+          + '✅ يجب أن يكون فريداً (لم يستخدمه أحد)\n'
+          + '✅ بين 3-20 حرفاً\n'
+          + '✅ يمكن تغييره لاحقاً بأمر /nickname\n\n'
+          + '✏️ *اكتب اسمك المستعار الآن:*'
+        : '✏️ *تغيير الاسم المستعار*\n\n'
+          + 'اكتب اسمك الجديد (3-20 حرف):'
+    ;
+    var kb = { inline_keyboard: [[{ text: '❌ إلغاء', callback_data: 'cancel_nickname' }]] };
+    if (editMsgId) {
+        try { await bot.editMessageText(text, { chat_id: chatId, message_id: editMsgId, parse_mode: 'Markdown', reply_markup: kb }); return; } catch(e) {}
+    }
+    await bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: kb });
+}
+
+async function handleNicknameInput(chatId, userId, text) {
+    if (!text || typeof text !== 'string') {
+        await bot.sendMessage(chatId, '⚠️ يرجى إرسال نص فقط كاسم مستعار.');
+        pendingNickname[chatId] = true;
+        return;
+    }
+    var nick = text.trim();
+    if (nick.length < 3 || nick.length > 20) {
+        await bot.sendMessage(chatId, '⚠️ الاسم يجب أن يكون بين 3 و 20 حرفاً. حاول مرة أخرى:');
+        pendingNickname[chatId] = true;
+        return;
+    }
+    // منع الرموز الخطرة
+    if (/[<>"'`]/.test(nick)) {
+        await bot.sendMessage(chatId, '⚠️ الاسم يحتوي على رموز غير مسموحة. حاول مرة أخرى:');
+        pendingNickname[chatId] = true;
+        return;
+    }
+    var taken = await isNicknameTaken(nick, userId);
+    if (taken) {
+        await bot.sendMessage(chatId, '⚠️ هذا الاسم مستخدم من عضو آخر. جرب اسماً آخر:');
+        pendingNickname[chatId] = true;
+        return;
+    }
+    await setUserField(userId, 'nickname', nick);
+    await sendWelcomeMenu(chatId, nick);
+}
+
+async function sendWelcomeMenu(chatId, nickname) {
+    var text = '🌟 أهلاً *' + nickname + '*!\n\n'
+        + 'اسمك المستعار: *' + nickname + '*\n'
+        + 'أي رسالة تكتبها ستصل لجميع الأعضاء باسمك هذا.\n\n'
+        + '⬇️ اختر ما تريد:';
+    var kb = { inline_keyboard: [
+        [{ text: '📰 آخر رسائل المجتمع', callback_data: 'view_feed_1' }],
+        [{ text: '✏️ تغيير اسمك المستعار', callback_data: 'change_nickname' }],
+        [{ text: 'ℹ️ كيف يعمل البوت؟', callback_data: 'how_it_works' }]
+    ]};
+    await bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: kb });
 }
 
 // ===== تشغيل البوت =====
@@ -236,6 +312,8 @@ var developerState = {};
 
 // حالة انتظار الرد من المستخدمين (userId -> communityMsgId)
 var pendingReplies = {};
+// حالة انتظار إدخال الاسم المستعار
+var pendingNickname = {};
 
 async function startBot() {
     await createPool();
@@ -245,7 +323,8 @@ async function startBot() {
 
     bot.setMyCommands([
         { command: 'start', description: '🏠 ابدأ من هنا' },
-        { command: 'feed', description: '📰 عرض آخر الرسائل' }
+        { command: 'feed', description: '📰 عرض آخر الرسائل' },
+        { command: 'nickname', description: '✏️ تغيير اسمك المستعار' }
     ]).catch(function(e) {});
 
     // ===== /start =====
@@ -261,24 +340,23 @@ async function startBot() {
 
         var fullName = ((msg.from.first_name || '') + ' ' + (msg.from.last_name || '')).trim();
         await updateUserData(userId, msg.from.username, fullName);
+        var user = await getUser(userId);
 
-        var welcomeText = '👋 *أهلاً بك في مجتمعنا!*\n\n'
-            + 'هذا البوت يتيح لك التواصل مع جميع الأعضاء بشكل مجهول.\n\n'
-            + '📌 *كيف يعمل البوت:*\n'
-            + '• أي رسالة ترسلها ستصل لجميع الأعضاء\n'
-            + '• يمكن لأي عضو الرد على رسالتك\n'
-            + '• هويتك محمية - يظهر فقط اسمك الأول وبصمة رقمية\n\n'
-            + '⬇️ *اختر ما تريد:*';
+        // إذا لم يختر اسماً مستعاراً بعد -> اطلب منه
+        if (!user || !user.nickname) {
+            await askForNickname(chatId, userId, true);
+            return;
+        }
 
-        var kb = {
-            inline_keyboard: [
-                [{ text: '✉️ إرسال رسالة للمجتمع', callback_data: 'compose_msg' }],
-                [{ text: '📰 آخر رسائل المجتمع', callback_data: 'view_feed_1' }],
-                [{ text: 'ℹ️ كيف يعمل البوت؟', callback_data: 'how_it_works' }]
-            ]
-        };
+        await sendWelcomeMenu(chatId, user.nickname);
+    });
 
-        await bot.sendMessage(chatId, welcomeText, { parse_mode: 'Markdown', reply_markup: kb });
+    // ===== /nickname - تغيير الاسم المستعار =====
+    bot.onText(/^\/nickname$/, async function(msg) {
+        var chatId = msg.chat.id;
+        var userId = msg.from.id;
+        if (userId.toString() === developerId) return;
+        await askForNickname(chatId, userId, false);
     });
 
     // ===== /feed =====
@@ -306,16 +384,32 @@ async function startBot() {
 
         // ===== أزرار المستخدم =====
         try {
+            if (data === 'change_nickname') {
+                await askForNickname(chatId, userId, false, msgId);
+                return;
+            }
+
+            if (data === 'cancel_nickname') {
+                delete pendingNickname[chatId];
+                var userNick = await getUser(userId);
+                if (userNick && userNick.nickname) {
+                    await sendWelcomeMenu(chatId, userNick.nickname);
+                } else {
+                    await bot.sendMessage(chatId, '⚠️ يجب اختيار اسم مستعار للمتابعة. أرسل /start للبدء.');
+                }
+                return;
+            }
+
             if (data === 'how_it_works') {
                 await bot.sendMessage(chatId,
                     'ℹ️ *كيف يعمل البوت؟*\n\n'
-                    + '1️⃣ تكتب رسالة أو ترسل صورة\n'
-                    + '2️⃣ تصل رسالتك لجميع الأعضاء\n'
+                    + '1️⃣ اختر اسمك المستعار عند أول دخول\n'
+                    + '2️⃣ اكتب رسالتك مباشرة وتصل لجميع الأعضاء\n'
                     + '3️⃣ أي عضو يضغط "رد" يرد عليك\n'
                     + '4️⃣ ردوده تصلك وتصل للجميع\n\n'
                     + '🔒 *الخصوصية:*\n'
-                    + 'يظهر اسمك الأول فقط مع بصمة رقمية (مثل: أحمد#42)\n'
-                    + 'لا يُكشف رقمك أو معلوماتك الكاملة لأحد',
+                    + 'يظهر اسمك المستعار الذي اخترته فقط\n'
+                    + 'لا يُكشف رقمك أو معلوماتك الحقيقية لأحد',
                     { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🔙 رجوع', callback_data: 'back_home' }]] } }
                 );
                 return;
@@ -324,10 +418,14 @@ async function startBot() {
             if (data === 'back_home') {
                 var fullName2 = ((cbq.from.first_name || '') + ' ' + (cbq.from.last_name || '')).trim();
                 await updateUserData(userId, cbq.from.username, fullName2);
-                var welcomeText2 = '👋 *أهلاً بك في مجتمعنا!*\n\nاختر ما تريد:';
+                var userNow = await getUser(userId);
+                var nickNow = userNow ? userNow.nickname : null;
+                if (!nickNow) { await askForNickname(chatId, userId, true, msgId); return; }
+                var welcomeText2 = '👋 *أهلاً ' + nickNow + '!*\n\nاختر ما تريد:';
                 var kb2 = { inline_keyboard: [
                     [{ text: '✉️ إرسال رسالة للمجتمع', callback_data: 'compose_msg' }],
                     [{ text: '📰 آخر رسائل المجتمع', callback_data: 'view_feed_1' }],
+                    [{ text: '✏️ تغيير اسمك المستعار', callback_data: 'change_nickname' }],
                     [{ text: 'ℹ️ كيف يعمل البوت؟', callback_data: 'how_it_works' }]
                 ]};
                 try { await bot.editMessageText(welcomeText2, { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: kb2 }); } catch (e) { await bot.sendMessage(chatId, welcomeText2, { parse_mode: 'Markdown', reply_markup: kb2 }); }
@@ -390,6 +488,19 @@ async function startBot() {
         if (user && user.banned) { await bot.sendMessage(chatId, '⛔ أنت محظور من استخدام البوت.'); return; }
         if (user && user.muted) return;
 
+        // هل ينتظر إدخال اسم مستعار؟
+        if (pendingNickname[chatId]) {
+            delete pendingNickname[chatId];
+            await handleNicknameInput(chatId, userId, msg.text);
+            return;
+        }
+
+        // إذا لم يختر اسماً مستعاراً بعد
+        if (!user || !user.nickname) {
+            await askForNickname(chatId, userId, true);
+            return;
+        }
+
         // إذا كان في وضع رد على رسالة محددة
         var pending = pendingReplies[chatId];
         if (pending) {
@@ -446,14 +557,17 @@ async function broadcastCommunityMessage(communityMsgId, senderUserId) {
     if (!msgData) return;
 
     var allUsers = await getAllUsers();
-    var alias = getSenderAlias(msgData.sender_id, msgData.sender_name);
+    // جلب بيانات المرسل مع الاسم المستعار
+    var senderUser = await getUser(msgData.sender_id);
+    var alias = getSenderAlias(msgData.sender_id, msgData.sender_name, senderUser ? senderUser.nickname : null);
 
     // بناء نص الرسالة
     var header = '';
     if (msgData.reply_to_id) {
         var origMsg = await getCommunityMessage(msgData.reply_to_id);
         if (origMsg) {
-            var origAlias = getSenderAlias(origMsg.sender_id, origMsg.sender_name);
+            var origSenderUser = await getUser(origMsg.sender_id);
+            var origAlias = getSenderAlias(origMsg.sender_id, origMsg.sender_name, origSenderUser ? origSenderUser.nickname : null);
             var origPreview = (origMsg.content || '[وسائط]').substring(0, 60);
             header = '↩️ *رد على ' + origAlias + ':*\n_' + origPreview + (origPreview.length >= 60 ? '...' : '') + '_\n\n';
         }
@@ -544,7 +658,8 @@ async function showFeed(chatId, page, editMsgId) {
     var btns = [];
     for (var i = 0; i < msgs.length; i++) {
         var m = msgs[i];
-        var alias = getSenderAlias(m.sender_id, m.sender_name);
+        var mUser = await getUser(m.sender_id);
+        var alias = getSenderAlias(m.sender_id, m.sender_name, mUser ? mUser.nickname : null);
         var timeStr = formatTime(m.ts);
         var preview = (m.content || '[' + (m.media_type || 'وسائط') + ']').substring(0, 100);
         var replyInfo = m.reply_to_id ? '↩️ رد على #' + m.reply_to_id + '\n' : '';
@@ -724,7 +839,8 @@ async function handleDeveloperCallback(chatId, userId, msgId, data) {
             var cmid = parseInt(data.replace('dev_view_msg_', ''));
             var m = await getCommunityMessage(cmid);
             if (!m) { await bot.sendMessage(chatId, '⚠️ الرسالة غير موجودة.'); return; }
-            var alias2 = getSenderAlias(m.sender_id, m.sender_name);
+            var mSenderUser = await getUser(m.sender_id);
+    var alias2 = getSenderAlias(m.sender_id, m.sender_name, mSenderUser ? mSenderUser.nickname : null);
             var fullInfo = '📨 *رسالة #' + m.id + '*\n\n'
                 + '👤 ' + alias2 + '\n'
                 + '🆔 ID: `' + m.sender_id + '`\n'
@@ -764,7 +880,8 @@ async function showDevFeed(chatId, page, editMsgId) {
 
     for (var i = 0; i < msgs.length; i++) {
         var m = msgs[i];
-        var alias = getSenderAlias(m.sender_id, m.sender_name);
+        var mUser2 = await getUser(m.sender_id);
+        var alias = getSenderAlias(m.sender_id, m.sender_name, mUser2 ? mUser2.nickname : null);
         var preview = (m.content || '[' + (m.media_type || 'وسائط') + ']').substring(0, 60);
         var replyMark = m.reply_to_id ? '↩️ ' : '';
         text += replyMark + '#' + m.id + ' | 👤 ' + alias + ' | ' + formatTime(m.ts) + '\n' + preview + '\n\n';
@@ -845,7 +962,7 @@ async function showDevUserDetail(chatId, tid, editMsgId) {
     );
     var wmc = weekMsgs[0] ? weekMsgs[0].cnt : 0;
 
-    var alias = getSenderAlias(tid, u.name);
+    var alias = getSenderAlias(tid, u.name, u.nickname);
 
     var text = '👤 *ملف العضو الكامل*\n';
     text += '─────────────────\n';
@@ -902,7 +1019,7 @@ async function showUserMessages(chatId, tid, page, editMsgId) {
     var total = totalRows[0] ? totalRows[0].cnt : 0;
     var totalPages = Math.ceil(total / perPage) || 1;
 
-    var alias = getSenderAlias(tid, userName);
+    var alias = getSenderAlias(tid, userName, u ? u.nickname : null);
     var text = '📜 *رسائل: ' + alias + '*\n';
     text += '📊 ' + total + ' رسالة | صفحة ' + page + '/' + totalPages + '\n';
     text += '─────────────────\n\n';

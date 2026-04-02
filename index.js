@@ -245,8 +245,7 @@ async function startBot() {
 
     bot.setMyCommands([
         { command: 'start', description: '🏠 ابدأ من هنا' },
-        { command: 'feed', description: '📰 عرض آخر الرسائل' },
-        { command: 'send', description: '✉️ إرسال رسالة للمجتمع' }
+        { command: 'feed', description: '📰 عرض آخر الرسائل' }
     ]).catch(function(e) {});
 
     // ===== /start =====
@@ -288,18 +287,6 @@ async function startBot() {
         var userId = msg.from.id;
         if (userId.toString() === developerId) return;
         await showFeed(chatId, 1);
-    });
-
-    // ===== /send =====
-    bot.onText(/^\/send$/, async function(msg) {
-        var chatId = msg.chat.id;
-        var userId = msg.from.id;
-        if (userId.toString() === developerId) return;
-        pendingReplies[chatId] = { type: 'new' };
-        await bot.sendMessage(chatId,
-            '✉️ *إرسال رسالة للمجتمع*\n\nاكتب رسالتك الآن وستصل لجميع الأعضاء:\n_(يمكنك إرسال نص أو صورة أو ملف)_',
-            { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '❌ إلغاء', callback_data: 'cancel_compose' }]] } }
-        );
     });
 
     // ===== معالجة أزرار =====
@@ -347,20 +334,9 @@ async function startBot() {
                 return;
             }
 
-            if (data === 'compose_msg') {
-                pendingReplies[chatId] = { type: 'new' };
-                try {
-                    await bot.editMessageText(
-                        '✉️ *إرسال رسالة للمجتمع*\n\nاكتب رسالتك الآن وستصل لجميع الأعضاء:\n_(نص أو صورة أو ملف)_',
-                        { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '❌ إلغاء', callback_data: 'cancel_compose' }]] } }
-                    );
-                } catch (e) {}
-                return;
-            }
-
-            if (data === 'cancel_compose') {
-                delete pendingReplies[chatId];
-                try { await bot.editMessageText('❌ تم الإلغاء.', { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: [[{ text: '🏠 الرئيسية', callback_data: 'back_home' }]] } }); } catch (e) {}
+            if (data === 'compose_msg' || data === 'cancel_compose') {
+                // لا يوجد وضع كتابة - الرسائل تُرسل مباشرة
+                try { await bot.editMessageText('💬 فقط اكتب رسالتك مباشرة وستصل للجميع!', { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: [[{ text: '🏠 الرئيسية', callback_data: 'back_home' }]] } }); } catch (e) {}
                 return;
             }
 
@@ -414,7 +390,7 @@ async function startBot() {
         if (user && user.banned) { await bot.sendMessage(chatId, '⛔ أنت محظور من استخدام البوت.'); return; }
         if (user && user.muted) return;
 
-        // هل هو في وضع كتابة رسالة/رد؟
+        // إذا كان في وضع رد على رسالة محددة
         var pending = pendingReplies[chatId];
         if (pending) {
             delete pendingReplies[chatId];
@@ -422,7 +398,7 @@ async function startBot() {
             return;
         }
 
-        // إذا أرسل رسالة عادية بدون وضع كتابة -> اعتبرها رسالة جديدة للمجتمع
+        // أي رسالة عادية -> ترسل للمجتمع مباشرة بدون خطوات
         await handleUserPost(msg, userId, userName, fullName, { type: 'new' });
     });
 
@@ -460,12 +436,7 @@ async function handleUserPost(msg, userId, userName, fullName, pending) {
         return;
     }
 
-    // تأكيد للمرسل
-    await bot.sendMessage(chatId, '✅ تم إرسال رسالتك للمجتمع!', {
-        reply_markup: { inline_keyboard: [[{ text: '📰 عرض المجتمع', callback_data: 'view_feed_1' }]] }
-    });
-
-    // إرسال للجميع
+    // إرسال للجميع (بدون تأكيد للمرسل - تجربة طبيعية مثل تيليغرام)
     await broadcastCommunityMessage(communityMsgId, userId);
 }
 
@@ -497,8 +468,8 @@ async function broadcastCommunityMessage(communityMsgId, senderUserId) {
     for (var i = 0; i < allUsers.length; i++) {
         var u = allUsers[i];
         if (u.banned || u.muted) continue;
-        // لا نرسل للمرسل نفسه (قد تغير هذا حسب الرغبة)
-        // if (u.id === String(senderUserId)) continue;
+        // لا نرسل الرسالة للمرسل نفسه
+        if (u.id === String(senderUserId)) continue;
 
         try {
             var sentMsg = null;
@@ -739,6 +710,15 @@ async function handleDeveloperCallback(chatId, userId, msgId, data) {
             return;
         }
 
+        // عرض كل رسائل عضو محدد
+        if (data.match(/^dev_user_msgs_\d+_\d+$/)) {
+            var parts5 = data.replace('dev_user_msgs_', '').split('_');
+            var umTid = parts5[0];
+            var umPage = parseInt(parts5[1]) || 1;
+            await showUserMessages(chatId, umTid, umPage, msgId);
+            return;
+        }
+
         // عرض رسالة مجتمعية كاملة للمطور
         if (data.startsWith('dev_view_msg_')) {
             var cmid = parseInt(data.replace('dev_view_msg_', ''));
@@ -836,31 +816,119 @@ async function showDevUsers(chatId, page, editMsgId) {
     await bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
 }
 
-// ===== تفاصيل عضو للمطور =====
+// ===== تفاصيل عضو للمطور (ملف شامل) =====
 async function showDevUserDetail(chatId, tid, editMsgId) {
     var u = await getUser(tid);
     if (!u) { await bot.sendMessage(chatId, '❌ العضو غير موجود.'); return; }
+
+    // إحصائيات الرسائل
     var msgCount = await query('SELECT COUNT(*) as cnt FROM community_messages WHERE sender_id=?', [String(tid)]);
     var mc = msgCount[0] ? msgCount[0].cnt : 0;
-    var text = '👤 *تفاصيل العضو*\n\n'
-        + '📝 الاسم: ' + (u.name || '-') + '\n'
-        + '🔗 يوزر: ' + (u.username ? '@' + u.username : '-') + '\n'
-        + '🆔 ID: `' + u.id + '`\n'
-        + '📨 رسائل أرسلها: ' + mc + '\n'
-        + '🕒 آخر نشاط: ' + formatTime(u.last_seen) + '\n'
-        + '📅 أول دخول: ' + formatTime(u.first_seen) + '\n'
-        + '🚫 محظور: ' + (u.banned ? 'نعم' : 'لا') + '\n'
-        + '🔇 مكتوم: ' + (u.muted ? 'نعم' : 'لا');
+
+    // آخر 3 رسائل للعضو
+    var lastMsgs = await query(
+        'SELECT content, media_type, ts FROM community_messages WHERE sender_id=? ORDER BY ts DESC LIMIT 3',
+        [String(tid)]
+    );
+
+    // رسائل اليوم
+    var todayMsgs = await query(
+        'SELECT COUNT(*) as cnt FROM community_messages WHERE sender_id=? AND ts > ?',
+        [String(tid), Date.now() - 86400000]
+    );
+    var tmc = todayMsgs[0] ? todayMsgs[0].cnt : 0;
+
+    // رسائل الأسبوع
+    var weekMsgs = await query(
+        'SELECT COUNT(*) as cnt FROM community_messages WHERE sender_id=? AND ts > ?',
+        [String(tid), Date.now() - 604800000]
+    );
+    var wmc = weekMsgs[0] ? weekMsgs[0].cnt : 0;
+
+    var alias = getSenderAlias(tid, u.name);
+
+    var text = '👤 *ملف العضو الكامل*\n';
+    text += '─────────────────\n';
+    text += '📝 الاسم: ' + (u.name || '-') + '\n';
+    text += '🔗 يوزر: ' + (u.username ? '@' + u.username : '-') + '\n';
+    text += '🆔 ID: `' + u.id + '`\n';
+    text += '🎭 البصمة: ' + alias + '\n';
+    text += '─────────────────\n';
+    text += '📊 *إحصائيات النشاط:*\n';
+    text += '📨 إجمالي الرسائل: ' + mc + '\n';
+    text += '📅 رسائل اليوم: ' + tmc + '\n';
+    text += '📆 رسائل الأسبوع: ' + wmc + '\n';
+    text += '🕒 آخر نشاط: ' + formatTime(u.last_seen) + '\n';
+    text += '📅 أول دخول: ' + formatTime(u.first_seen) + '\n';
+    text += '─────────────────\n';
+    text += '🚫 محظور: ' + (u.banned ? '✅ نعم' : '❌ لا') + '\n';
+    text += '🔇 مكتوم: ' + (u.muted ? '✅ نعم' : '❌ لا') + '\n';
+
+    if (lastMsgs.length > 0) {
+        text += '─────────────────\n';
+        text += '💬 *آخر رسائله:*\n';
+        for (var i = 0; i < lastMsgs.length; i++) {
+            var lm = lastMsgs[i];
+            var preview = (lm.content || '[' + (lm.media_type || 'وسائط') + ']').substring(0, 80);
+            text += '• ' + preview + (preview.length >= 80 ? '...' : '') + '\n';
+            text += '  🕒 ' + formatTime(lm.ts) + '\n';
+        }
+    }
 
     var kb = [
-        [{ text: u.banned ? '🔓 رفع حظر' : '🔨 حظر', callback_data: 'dev_do_' + (u.banned ? 'unban' : 'ban') + '_' + tid },
-         { text: u.muted ? '🔊 رفع كتم' : '🔇 كتم', callback_data: 'dev_do_' + (u.muted ? 'unmute' : 'mute') + '_' + tid }],
-        [{ text: '💬 مراسلة', callback_data: 'dev_do_reply_' + tid }],
+        [{ text: u.banned ? '🔓 رفع الحظر' : '🔨 حظر العضو', callback_data: 'dev_do_' + (u.banned ? 'unban' : 'ban') + '_' + tid },
+         { text: u.muted ? '🔊 رفع الكتم' : '🔇 كتم العضو', callback_data: 'dev_do_' + (u.muted ? 'unmute' : 'mute') + '_' + tid }],
+        [{ text: '💬 مراسلة العضو', callback_data: 'dev_do_reply_' + tid }],
+        [{ text: '📜 كل رسائله', callback_data: 'dev_user_msgs_' + tid + '_1' }],
         [{ text: '🔙 رجوع للأعضاء', callback_data: 'dev_users_1' }]
     ];
 
     if (editMsgId) { try { await bot.editMessageText(text, { chat_id: chatId, message_id: editMsgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: kb } }); return; } catch (e) {} }
     await bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: kb } });
+}
+
+// ===== عرض كل رسائل عضو محدد للمطور =====
+async function showUserMessages(chatId, tid, page, editMsgId) {
+    var u = await getUser(tid);
+    var userName = u ? (u.name || 'مجهول') : tid;
+    var perPage = 5;
+    var offset = (page - 1) * perPage;
+
+    var msgs = await query(
+        'SELECT * FROM community_messages WHERE sender_id=? ORDER BY ts DESC LIMIT ? OFFSET ?',
+        [String(tid), perPage, offset]
+    );
+    var totalRows = await query('SELECT COUNT(*) as cnt FROM community_messages WHERE sender_id=?', [String(tid)]);
+    var total = totalRows[0] ? totalRows[0].cnt : 0;
+    var totalPages = Math.ceil(total / perPage) || 1;
+
+    var alias = getSenderAlias(tid, userName);
+    var text = '📜 *رسائل: ' + alias + '*\n';
+    text += '📊 ' + total + ' رسالة | صفحة ' + page + '/' + totalPages + '\n';
+    text += '─────────────────\n\n';
+
+    if (msgs.length === 0) {
+        text += '📭 لا توجد رسائل.';
+    } else {
+        for (var i = 0; i < msgs.length; i++) {
+            var m = msgs[i];
+            var preview = (m.content || '[' + (m.media_type || 'وسائط') + ']').substring(0, 120);
+            var replyMark = m.reply_to_id ? '↩️ رد على #' + m.reply_to_id + '\n' : '';
+            text += '#' + m.id + ' | ' + formatTime(m.ts) + '\n';
+            text += replyMark + preview + (m.content && m.content.length > 120 ? '...' : '') + '\n\n';
+        }
+    }
+
+    var btns = [];
+    var navRow = [];
+    if (page > 1) navRow.push({ text: '⬅️ أحدث', callback_data: 'dev_user_msgs_' + tid + '_' + (page - 1) });
+    navRow.push({ text: page + '/' + totalPages, callback_data: 'noop_feed' });
+    if (page < totalPages) navRow.push({ text: 'أقدم ➡️', callback_data: 'dev_user_msgs_' + tid + '_' + (page + 1) });
+    if (navRow.length > 0) btns.push(navRow);
+    btns.push([{ text: '🔙 ملف العضو', callback_data: 'dev_user_' + tid }]);
+
+    if (editMsgId) { try { await bot.editMessageText(text, { chat_id: chatId, message_id: editMsgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } }); return; } catch (e) {} }
+    await bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
 }
 
 // ===== بناء أزرار اختيار مستخدم =====

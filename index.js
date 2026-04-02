@@ -12,9 +12,9 @@ var developerId = '7411444902';
 // ===== إعدادات قاعدة البيانات =====
 var DB_CONFIG = {
     host: 'sql5.freesqldatabase.com',
-    user: 'sql5815305',
-    password: '8GdhpQvUwt',
-    database: 'sql5815305',
+    user: 'sql5822025',
+    password: 'UHrehHF1CU',
+    database: 'sql5822025',
     port: 3306,
     connectTimeout: 20000,
     waitForConnections: true,

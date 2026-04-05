@@ -51,13 +51,17 @@ async function initDB() {
     try {
         var conn = await pool.getConnection();
 
-        await conn.execute("CREATE TABLE IF NOT EXISTS users (id VARCHAR(50) PRIMARY KEY, username VARCHAR(255) DEFAULT '', name VARCHAR(500) DEFAULT '', first_seen BIGINT DEFAULT 0, last_seen BIGINT DEFAULT 0, messages_count INT DEFAULT 0, banned TINYINT(1) DEFAULT 0, muted TINYINT(1) DEFAULT 0, phone VARCHAR(50) DEFAULT '') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
-
-        // إضافة عمود phone إذا لم يكن موجوداً
+        await conn.execute("CREATE TABLE IF NOT EXISTS users (id VARCHAR(50) PRIMARY KEY, username VARCHAR(255) DEFAULT '', name VARCHAR(500) DEFAULT '', first_seen BIGINT DEFAULT 0, last_seen BIGINT DEFAULT 0, messages_count INT DEFAULT 0, banned TINYINT(1) DEFAULT 0, muted TINYINT(1) DEFAULT 0, phone VARCHAR(50) DEFAULT '', verified TINYINT(1) DEFAULT 0) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
         try { await conn.execute('ALTER TABLE users ADD COLUMN phone VARCHAR(50) DEFAULT NULL'); } catch(e) {}
+        try { await conn.execute('ALTER TABLE users ADD COLUMN verified TINYINT(1) DEFAULT 0'); } catch(e) {}
 
-        await conn.execute("CREATE TABLE IF NOT EXISTS admins (user_id VARCHAR(50) PRIMARY KEY, added_by VARCHAR(50) NOT NULL, added_at BIGINT DEFAULT 0, multi_reply TINYINT(1) DEFAULT 0) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+        await conn.execute("CREATE TABLE IF NOT EXISTS admins (user_id VARCHAR(50) PRIMARY KEY, added_by VARCHAR(50) NOT NULL, added_at BIGINT DEFAULT 0, multi_reply TINYINT(1) DEFAULT 0, last_login BIGINT DEFAULT 0, total_active_minutes INT DEFAULT 0, helped_count INT DEFAULT 0) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
         try { await conn.execute('ALTER TABLE admins ADD COLUMN multi_reply TINYINT(1) DEFAULT 0'); } catch(e) {}
+        try { await conn.execute('ALTER TABLE admins ADD COLUMN last_login BIGINT DEFAULT 0'); } catch(e) {}
+        try { await conn.execute('ALTER TABLE admins ADD COLUMN total_active_minutes INT DEFAULT 0'); } catch(e) {}
+        try { await conn.execute('ALTER TABLE admins ADD COLUMN helped_count INT DEFAULT 0'); } catch(e) {}
+
+        await conn.execute("CREATE TABLE IF NOT EXISTS cb_data (id INT AUTO_INCREMENT PRIMARY KEY, data TEXT NOT NULL, ts BIGINT DEFAULT 0) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
 
         await conn.execute("CREATE TABLE IF NOT EXISTS msg_map (id INT AUTO_INCREMENT PRIMARY KEY, user_id VARCHAR(50) NOT NULL, user_msg_id INT NOT NULL, fwd_msg_id INT NOT NULL, fwd_chat_id VARCHAR(50) NOT NULL, ts BIGINT DEFAULT 0, INDEX idx_user (user_id), INDEX idx_fwd (fwd_msg_id, fwd_chat_id)) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
 
@@ -137,12 +141,24 @@ async function query(sql, params) {
     }
 }
 
+async function saveCB(data) {
+    if (data.length < 50) return data;
+    var res = await query('INSERT INTO cb_data (data, ts) VALUES (?, ?)', [data, Date.now()]);
+    return 'c_' + res.insertId;
+}
+
+async function getCB(id) {
+    if (!id.startsWith('c_')) return id;
+    var res = await query('SELECT data FROM cb_data WHERE id=?', [id.substring(2)]);
+    return res.length > 0 ? res[0].data : null;
+}
+
 // ===== دوال المستخدمين =====
 async function getUser(userId) {
     try {
         var rows = await query('SELECT * FROM users WHERE id=?', [String(userId)]);
         if (rows.length === 0) return null;
-        var u = rows[0]; u.banned = u.banned === 1; u.muted = u.muted === 1;
+        var u = rows[0]; u.banned = u.banned === 1; u.muted = u.muted === 1; u.verified = u.verified === 1;
         return u;
     } catch (e) { return null; }
 }
@@ -279,9 +295,13 @@ var pendingNotify = {};
 // ===== تشغيل البوت =====
 async function startBot() {
     await createPool();
-
     bot = new TelegramBot(BOT_TOKEN, { polling: true });
-    console.log('🤖 بوت الأساتذة يعمل...');
+    devState = {};
+
+    // تنظيف cb_data القديمة كل ساعة
+    setInterval(async function() {
+        try { await query('DELETE FROM cb_data WHERE ts < ?', [Date.now() - 24 * 60 * 60 * 1000]); } catch(e) {}
+    }, 3600000);
 
     bot.setMyCommands([
         { command: 'start', description: '🏠 القائمة الرئيسية' }
@@ -396,6 +416,13 @@ async function startBot() {
 
     // ===== لوحة التحكم الرئيسية =====
     async function sendMainMenu(chatId, editMsgId) {
+        var userId = String(chatId);
+        // تحديث آخر ظهور
+        if (isAdminUser(userId)) {
+            await query('UPDATE admins SET last_login=? WHERE user_id=?', [Date.now(), userId]);
+        }
+        var adminStats = (await query('SELECT * FROM admins WHERE user_id=?', [userId]))[0];
+
         var allUsers = await getAllUsers();
         var total = allUsers.length;
         var banned = allUsers.filter(function(u) { return u.banned; }).length;
@@ -421,6 +448,9 @@ async function startBot() {
         } catch (e) {}
 
         var text = '🔧 *لوحة التحكم*\n'
+            + '━━━━━━━━━━━━━━━\n'
+            + '👤 الرتبة: ' + (isDeveloper(userId) ? '*المطور*' : '*أستاذ/أدمن*') + '\n'
+            + (adminStats ? '🤝 ساعدت: `' + (adminStats.helped_count || 0) + '` | ⏱ نشاط: `' + (adminStats.total_active_minutes || 0) + '`د\n' : '')
             + '━━━━━━━━━━━━━━━\n'
             + '👥 المستخدمين: ' + total + '\n'
             + '🟢 نشطين اليوم: ' + active + '\n'
@@ -458,11 +488,23 @@ async function startBot() {
     // ===== معالجة الأزرار =====
     bot.on('callback_query', async function(cbq) {
         var chatId = cbq.message.chat.id;
-        var userId = cbq.from.id;
+        var userId = String(cbq.from.id);
         var msgId = cbq.message.message_id;
-        var data = cbq.data;
+        var rawData = cbq.data;
+        var data = await getCB(rawData);
 
         await bot.answerCallbackQuery(cbq.id).catch(function() {});
+
+        // تتبع نشاط الأدمن
+        if (isAdminUser(userId)) {
+            var adminData = (await query('SELECT * FROM admins WHERE user_id=?', [userId]))[0];
+            if (adminData) {
+                var now = Date.now();
+                if (now - adminData.last_login > 60000) {
+                    await query('UPDATE admins SET total_active_minutes = total_active_minutes + 1, last_login = ? WHERE user_id = ?', [now, userId]);
+                }
+            }
+        }
 
         if (!isAdminUser(userId)) {
             await handleUserCallback(chatId, userId, msgId, data, cbq);
@@ -1072,8 +1114,8 @@ async function startBot() {
                 var multiLabel = a.multi_reply ? ' 🔓متعدد' : '';
                 text += '• ' + aName + multiLabel + ' (ID: `' + a.user_id + '`)\n';
                 btns.push([
-                    { text: '❌ إزالة ' + (a.name || a.user_id), callback_data: 'rm_admin_' + a.user_id },
-                    { text: (a.multi_reply ? '🔒 سحب متعدد' : '🔓 منح متعدد'), callback_data: 'toggle_multi_' + a.user_id }
+                    { text: '❌ إزالة ' + (a.name || a.user_id), callback_data: await saveCB('rm_admin_' + a.user_id) },
+                    { text: (a.multi_reply ? '🔒 سحب متعدد' : '🔓 منح متعدد'), callback_data: await saveCB('toggle_multi_' + a.user_id) }
                 ]);
             }
         } else {
@@ -1115,7 +1157,7 @@ async function startBot() {
                 text += status + ' | 👤 ' + uName + '\n🕒 ' + formatTime(t.created_at) + '\n\n';
                 var rowBtns = [{ text: '👤 ' + uName, callback_data: 'user_' + t.user_id }];
                 if (!t.claimed_by) {
-                    rowBtns.push({ text: '🙋 سأتكفل بهذا الطلب', callback_data: 'claim_' + t.user_id + '_' + t.id });
+                    rowBtns.push({ text: '🙋 سأتكفل بهذا الطلب', callback_data: await saveCB('claim_' + t.user_id + '_' + t.id) });
                 }
                 btns.push(rowBtns);
             }
@@ -1468,9 +1510,32 @@ async function startBot() {
     // ===== معالجة رسائل المستخدم العادي =====
     bot.on('message', async function(msg) {
         var chatId = msg.chat.id;
-        var userId = msg.from.id;
+        var userId = String(msg.from.id);
         var userName = msg.from.username || '';
         var fullName = ((msg.from.first_name || '') + ' ' + (msg.from.last_name || '')).trim();
+
+        if (msg.chat.type !== 'private') return;
+
+        // معالجة جهة الاتصال للتحقق
+        if (msg.contact) {
+            if (String(msg.contact.user_id) !== userId) {
+                await bot.sendMessage(chatId, '⚠️ يرجى إرسال جهة اتصالك الخاصة بك فقط!');
+                return;
+            }
+            await query('UPDATE users SET phone=?, verified=1 WHERE id=?', [msg.contact.phone_number, userId]);
+            await bot.sendMessage(chatId, '✅ تم التحقق من هويتك بنجاح! يمكنك الآن متابعة طلبك.', { reply_markup: { remove_keyboard: true } });
+            
+            // إشعار المطور
+            await bot.sendMessage(developerId, 
+                '🆕 *تحقق جديد بجهة اتصال*\n━━━━━━━━━━━━━━━\n' +
+                '👤 الاسم: ' + fullName + '\n' +
+                '🆔 ID: `' + userId + '`\n' +
+                '📞 الهاتف: `' + msg.contact.phone_number + '`\n' +
+                '🔗 اليوزر: @' + (userName || 'لا يوجد'),
+                { parse_mode: 'Markdown' }
+            );
+            return;
+        }
 
         if (msg.text && msg.text.startsWith('/')) return;
 
@@ -1487,6 +1552,23 @@ async function startBot() {
         }
         if (user && user.muted) {
             await bot.sendMessage(chatId, '🔇 أنت مكتوم حالياً ولا يمكنك إرسال رسائل.');
+            return;
+        }
+
+        // التحقق من الهوية للمستخدمين الجدد
+        if (user && !user.verified) {
+            await bot.sendMessage(chatId, 
+                '⚠️ *يجب التحقق من هويتك أولاً*\n━━━━━━━━━━━━━━━\n' +
+                'لضمان جودة الخدمة ومنع الحسابات الوهمية، يرجى الضغط على الزر أدناه لمشاركة جهة اتصالك الحقيقية.',
+                { 
+                    parse_mode: 'Markdown', 
+                    reply_markup: { 
+                        keyboard: [[{ text: '✅ اضغط هنا للتحقق 👤', request_contact: true }]],
+                        resize_keyboard: true,
+                        one_time_keyboard: true
+                    } 
+                }
+            );
             return;
         }
 
@@ -1526,6 +1608,7 @@ async function startBot() {
             + '👤 ' + (fullName || 'بدون اسم') + '\n'
             + '🔗 ' + (userName ? '@' + userName : 'بدون يوزر') + '\n'
             + '🆔 `' + userId + '`\n'
+            + '📞 `' + (user.phone || 'غير متوفر') + '`\n'
             + '🕒 ' + time + '\n━━━━━━━━━━━━━━━';
 
         var ticketId = await createTicket(userId);
@@ -1538,12 +1621,12 @@ async function startBot() {
 
         var quickBtns = { inline_keyboard: [
             [
-                { text: '↩️ رد', callback_data: 'qr_' + userId },
-                { text: '🚫 حظر', callback_data: 'do_ban_' + userId },
-                { text: '🔇 كتم', callback_data: 'do_mute_' + userId }
+                { text: '↩️ رد', callback_data: await saveCB('qr_' + userId) },
+                { text: '🚫 حظر وحذف', callback_data: await saveCB('do_ban_' + userId) },
+                { text: '🔇 كتم', callback_data: await saveCB('do_mute_' + userId) }
             ],
             [
-                { text: '🙋 سأتكفل بهذا الطلب', callback_data: 'claim_' + userId + '_' + ticketId }
+                { text: '🙋 سأتكفل بهذا الطلب', callback_data: await saveCB('claim_' + userId + '_' + ticketId) }
             ]
         ]};
 
@@ -1688,6 +1771,9 @@ async function startBot() {
             devState[chatId] = {};
             try {
                 await bot.copyMessage(target, chatId, msg.message_id);
+                // تحديث إحصائيات الأدمن
+                await query('UPDATE admins SET helped_count = helped_count + 1 WHERE user_id = ?', [String(userId)]);
+                
                 // حفظ رد الأدمن في سجل التذكرة
                 var targetTicket = await getOpenTicket(target);
                 if (targetTicket) {

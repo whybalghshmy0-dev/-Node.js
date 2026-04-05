@@ -55,10 +55,9 @@ async function initDB() {
 
         await conn.execute("CREATE TABLE IF NOT EXISTS admins (user_id VARCHAR(50) PRIMARY KEY, added_by VARCHAR(50) NOT NULL, added_at BIGINT DEFAULT 0) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
 
-        // جدول ربط الرسائل (رسالة المستخدم ← الرسالة المحولة للمطور)
         await conn.execute("CREATE TABLE IF NOT EXISTS msg_map (id INT AUTO_INCREMENT PRIMARY KEY, user_id VARCHAR(50) NOT NULL, user_msg_id INT NOT NULL, fwd_msg_id INT NOT NULL, fwd_chat_id VARCHAR(50) NOT NULL, ts BIGINT DEFAULT 0, INDEX idx_user (user_id), INDEX idx_fwd (fwd_msg_id, fwd_chat_id)) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
 
-        // تحميل الأدمنية
+        // تحميل الأدمنية من قاعدة البيانات
         var adminRows = await conn.execute('SELECT user_id FROM admins');
         for (var i = 0; i < adminRows[0].length; i++) {
             if (adminIds.indexOf(adminRows[0][i].user_id) === -1) {
@@ -120,6 +119,8 @@ async function setUserField(userId, field, value) {
 
 // ===== دوال الأدمنية =====
 async function addAdmin(userId, addedBy) {
+    // المطور لا يُضاف كأدمن (هو أعلى مرتبة)
+    if (String(userId) === developerId) return;
     try {
         await query('INSERT IGNORE INTO admins (user_id, added_by, added_at) VALUES (?, ?, ?)', [String(userId), String(addedBy), Date.now()]);
         if (adminIds.indexOf(String(userId)) === -1) adminIds.push(String(userId));
@@ -127,10 +128,12 @@ async function addAdmin(userId, addedBy) {
 }
 
 async function removeAdmin(userId) {
+    // المطور محمي تماماً - لا يمكن إزالته أبداً
+    if (String(userId) === developerId) return;
     try {
         await query('DELETE FROM admins WHERE user_id=?', [String(userId)]);
         var idx = adminIds.indexOf(String(userId));
-        if (idx > -1 && String(userId) !== developerId) adminIds.splice(idx, 1);
+        if (idx > -1) adminIds.splice(idx, 1);
     } catch (e) {}
 }
 
@@ -163,16 +166,15 @@ function getUserName(u) {
 
 // ===== المتغيرات العامة =====
 var bot = null;
-var devState = {}; // حالة المطور/الأدمن
-var lastWelcome = {}; // آخر ترحيب لكل مستخدم
-var pendingNotify = {}; // مستخدمين ينتظرون فتح المحادثة
+var devState = {};
+var pendingNotify = {};
 
 // ===== تشغيل البوت =====
 async function startBot() {
     await createPool();
 
     bot = new TelegramBot(BOT_TOKEN, { polling: true });
-    console.log('🤖 بوت التواصل يعمل...');
+    console.log('🤖 بوت الأساتذة يعمل...');
 
     bot.setMyCommands([
         { command: 'start', description: '🏠 القائمة الرئيسية' }
@@ -191,21 +193,51 @@ async function startBot() {
             return;
         }
 
+        // تحقق إذا مستخدم جديد قبل التحديث
+        var isNew = !(await getUser(userId));
         await updateUser(userId, msg.from.username, fullName);
 
-        var text = '👋 أهلاً بك *' + (fullName || 'عزيزي') + '*!\n\n'
-            + '📩 يمكنك إرسال رسالتك هنا وسوف تصل مباشرة للأستاذ.\n\n'
-            + '📌 يمكنك إرسال:\n'
-            + '• نصوص\n'
-            + '• صور بدقة عالية 📸\n'
-            + '• فيديوهات 🎥\n'
-            + '• ملفات 📁\n'
-            + '• مقاطع صوتية 🎤\n'
-            + '• ملصقات\n'
+        // رسالة الترحيب الكاملة
+        var introText = '🎓 *هنا أستاذك الخاص*\n\n'
+            + 'لقد كثرت الـ AI بشكل كبير ومتفرع جداً، وكلهن متخصصات حتى في حل الواجبات والتكاليف وكل ما يتعلق بالأسئلة الوزارية.\n\n'
+            + 'ولكن نحيطك علماً — وأنت تعرف ذلك — أن *50% من إجاباتهم خاطئة* ❌\n\n'
+            + 'لهذا، هذا البوت يوفر لكم *أساتذة ومعيدين متخصصين* لخدمتكم شخصياً مع *ضمان الإجابات 100%* ✅\n\n'
+            + 'سوف يصل طلبك للأستاذ المناسب فوراً.\n\n'
+            + '━━━━━━━━━━━━━━━\n'
+            + '👋 أهلاً بك *' + (fullName || 'عزيزي') + '*!\n\n'
+            + '📩 أرسل سؤالك أو طلبك الآن مباشرة وسيصل للأستاذ.\n\n'
+            + '📌 *يمكنك إرسال:*\n'
+            + '• 📝 نصوص وأسئلة\n'
+            + '• 📸 صور بدقة عالية\n'
+            + '• 🎥 فيديوهات\n'
+            + '• 📁 ملفات وواجبات\n'
+            + '• 🎤 مقاطع صوتية\n'
             + '• أي شيء!\n\n'
-            + '✅ سيتم إعلامك عندما يفتح الأستاذ المحادثة.';
+            + '✅ سوف نعلمك فور فتح الأستاذ للمحادثة.';
 
-        await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, introText, { parse_mode: 'Markdown' });
+
+        // إشعار جميع الأدمنية بمستخدم جديد
+        if (isNew) {
+            var newUserNotif = '🆕 *مستخدم جديد انضم!*\n━━━━━━━━━━━━━━━\n'
+                + '👤 ' + (fullName || 'بدون اسم') + '\n'
+                + '🔗 ' + (msg.from.username ? '@' + msg.from.username : 'بدون يوزر') + '\n'
+                + '🆔 `' + userId + '`\n'
+                + '🕒 ' + formatTime(Date.now());
+            var adminsNew = await getAdminList();
+            var recipientsNew = [developerId];
+            for (var ni = 0; ni < adminsNew.length; ni++) {
+                if (adminsNew[ni].user_id !== developerId) recipientsNew.push(adminsNew[ni].user_id);
+            }
+            for (var nj = 0; nj < recipientsNew.length; nj++) {
+                try {
+                    await bot.sendMessage(recipientsNew[nj], newUserNotif, {
+                        parse_mode: 'Markdown',
+                        reply_markup: { inline_keyboard: [[{ text: '💬 مراسلة', callback_data: 'qr_' + userId }]] }
+                    });
+                } catch (e) {}
+            }
+        }
     });
 
     // ===== إشعار المستخدمين بفتح المحادثة =====
@@ -215,12 +247,16 @@ async function startBot() {
             var uid = keys[i];
             if (pendingNotify[uid] && !pendingNotify[uid].notified) {
                 try {
-                    await bot.sendMessage(uid, '✅ الأستاذ فتح المحادثة وسوف يطلع على رسائلك ويرد عليك قريباً.');
+                    await bot.sendMessage(uid,
+                        '👀 *تمت قراءة رسالتك*\n\n'
+                        + '✅ الأستاذ فتح المحادثة وسوف يطلع على رسائلك ويرد عليك قريباً.\n\n'
+                        + '⏳ يرجى الانتظار، الرد في الطريق إليك!',
+                        { parse_mode: 'Markdown' }
+                    );
                     pendingNotify[uid].notified = true;
                 } catch (e) {}
             }
         }
-        // تنظيف
         setTimeout(function() {
             var ks = Object.keys(pendingNotify);
             for (var j = 0; j < ks.length; j++) {
@@ -280,7 +316,6 @@ async function startBot() {
         if (!isAdminUser(userId)) return;
 
         try {
-            // ===== رجوع للوحة =====
             if (data === 'main') {
                 devState[chatId] = {};
                 await sendMainMenu(chatId, msgId);
@@ -293,6 +328,8 @@ async function startBot() {
             // ===== رد سريع =====
             if (data.startsWith('qr_')) {
                 var qrId = data.replace('qr_', '');
+                // حماية المطور من الإجراءات
+                if (String(qrId) === developerId && !isDeveloper(userId)) return;
                 devState[chatId] = { action: 'reply', targetId: qrId };
                 var qrUser = await getUser(qrId);
                 await bot.sendMessage(chatId, '💬 *الرد على: ' + (qrUser ? getUserName(qrUser) : qrId) + '*\n\n✏️ اكتب ردك الآن (نص، صورة، فيديو، ملف، أي شيء):', {
@@ -362,10 +399,10 @@ async function startBot() {
                 var action = parts[1];
                 var pg2 = parseInt(parts[2]) || 1;
                 var filterFn = null;
-                if (action === 'ban') filterFn = function(u) { return !u.banned; };
-                if (action === 'unban') filterFn = function(u) { return u.banned; };
-                if (action === 'mute') filterFn = function(u) { return !u.muted; };
-                if (action === 'unmute') filterFn = function(u) { return u.muted; };
+                if (action === 'ban') filterFn = function(u) { return !u.banned && u.id !== developerId; };
+                if (action === 'unban') filterFn = function(u) { return u.banned && u.id !== developerId; };
+                if (action === 'mute') filterFn = function(u) { return !u.muted && u.id !== developerId; };
+                if (action === 'unmute') filterFn = function(u) { return u.muted && u.id !== developerId; };
                 var titles = { ban: '🔨 اختر مستخدم للحظر:', unban: '🔓 اختر مستخدم لرفع الحظر:', mute: '🔇 اختر مستخدم للكتم:', unmute: '🔊 اختر مستخدم لرفع الكتم:', reply: '💬 اختر مستخدم للمراسلة:' };
                 var r = await buildUserBtns('do_' + action, pg2, filterFn, 'pick_' + action);
                 var t2 = titles[action] || 'اختر:';
@@ -378,6 +415,11 @@ async function startBot() {
             if (data.match(/^do_(ban|unban|mute|unmute)_\d+$/)) {
                 var pp = data.replace('do_', '').split('_');
                 var act = pp[0]; var tid2 = pp[1];
+                // حماية المطور من أي إجراء
+                if (String(tid2) === developerId) {
+                    try { await bot.editMessageText('⛔ لا يمكن تطبيق أي إجراء على المطور.', { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: [[{ text: '🔙 رجوع', callback_data: 'main' }]] } }); } catch (e) {}
+                    return;
+                }
                 var u2 = await getUser(tid2);
                 var actNames = { ban: '🔨 حظر', unban: '🔓 رفع حظر', mute: '🔇 كتم', unmute: '🔊 رفع كتم' };
                 var ct = '*' + actNames[act] + '*\n\n👤 ' + (u2 ? getUserName(u2) : tid2) + '\n🆔 `' + tid2 + '`\n\nهل أنت متأكد؟';
@@ -398,6 +440,11 @@ async function startBot() {
             if (data.startsWith('cf_')) {
                 var pp4 = data.replace('cf_', '').split('_');
                 var act4 = pp4[0]; var tid4 = pp4[1];
+                // حماية المطور
+                if (String(tid4) === developerId) {
+                    try { await bot.editMessageText('⛔ لا يمكن تطبيق أي إجراء على المطور.', { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: [[{ text: '🔙 رجوع', callback_data: 'main' }]] } }); } catch (e) {}
+                    return;
+                }
                 var result = '';
                 if (act4 === 'ban') {
                     await setUserField(tid4, 'banned', 1); result = '✅ تم حظر `' + tid4 + '`';
@@ -414,7 +461,7 @@ async function startBot() {
                 return;
             }
 
-            // ===== إدارة الأدمنية =====
+            // ===== إدارة الأدمنية (المطور فقط) =====
             if (data === 'admin_panel') {
                 if (!isDeveloper(userId)) { await bot.sendMessage(chatId, '⛔ فقط المطور.'); return; }
                 await showAdminPanel(chatId, msgId);
@@ -422,20 +469,24 @@ async function startBot() {
             }
 
             if (data === 'add_admin_id') {
+                if (!isDeveloper(userId)) return;
                 devState[chatId] = { action: 'add_admin' };
                 try { await bot.editMessageText('👨‍💼 *إضافة أدمن*\n\n✏️ أرسل ID الشخص:', { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '❌ إلغاء', callback_data: 'admin_panel' }]] } }); } catch (e) {}
                 return;
             }
 
             if (data.match(/^pick_add_admin_\d+$/)) {
+                if (!isDeveloper(userId)) return;
                 var pg3 = parseInt(data.replace('pick_add_admin_', '')) || 1;
-                var r3 = await buildUserBtns('add_admin_from', pg3, null, 'pick_add_admin');
+                var r3 = await buildUserBtns('add_admin_from', pg3, function(u) { return u.id !== developerId; }, 'pick_add_admin');
                 try { await bot.editMessageText('👨‍💼 اختر مستخدم لإضافته كأدمن:', { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: r3.buttons } }); } catch (e) {}
                 return;
             }
 
             if (data.startsWith('add_admin_from_')) {
+                if (!isDeveloper(userId)) return;
                 var aId = data.replace('add_admin_from_', '');
+                if (String(aId) === developerId) { await bot.sendMessage(chatId, '⛔ المطور لا يُضاف كأدمن.'); return; }
                 await addAdmin(aId, userId);
                 var aUser = await getUser(aId);
                 await bot.sendMessage(chatId, '✅ تم إضافة *' + (aUser ? getUserName(aUser) : aId) + '* كأدمن.', { parse_mode: 'Markdown' });
@@ -445,7 +496,10 @@ async function startBot() {
             }
 
             if (data.startsWith('rm_admin_')) {
+                if (!isDeveloper(userId)) { await bot.sendMessage(chatId, '⛔ فقط المطور يمكنه إزالة الأدمنية.'); return; }
                 var rmId = data.replace('rm_admin_', '');
+                // حماية المطور
+                if (String(rmId) === developerId) { await bot.sendMessage(chatId, '⛔ لا يمكن إزالة المطور.'); return; }
                 await removeAdmin(rmId);
                 var rmUser = await getUser(rmId);
                 await bot.sendMessage(chatId, '✅ تم إزالة *' + (rmUser ? getUserName(rmUser) : rmId) + '* من الأدمنية.', { parse_mode: 'Markdown' });
@@ -463,7 +517,7 @@ async function startBot() {
     async function showAdminPanel(chatId, editMsgId) {
         var admins = await getAdminList();
         var text = '👨‍💼 *إدارة الأدمنية*\n━━━━━━━━━━━━━━━\n'
-            + '👑 المطور: أنت (ID: `' + developerId + '`)\n';
+            + '👑 المطور: (ID: `' + developerId + '`) - محمي دائماً\n';
 
         var btns = [];
         if (admins.length > 0) {
@@ -505,6 +559,7 @@ async function startBot() {
             var label = '';
             if (u.banned) label += '🚫 ';
             if (u.muted) label += '🔇 ';
+            if (u.id === developerId) label += '👑 ';
             label += (u.name || 'بدون اسم');
             if (u.username) label += ' @' + u.username;
             btns.push([{ text: label, callback_data: 'user_' + u.id }]);
@@ -531,7 +586,9 @@ async function startBot() {
         var todayMsgs = 0;
         try { var tm = await query('SELECT COUNT(*) as cnt FROM msg_map WHERE user_id=? AND ts > ?', [String(tid), Date.now() - 86400000]); todayMsgs = tm[0] ? tm[0].cnt : 0; } catch (e) {}
 
+        var isDev = String(tid) === developerId;
         var text = '👤 *ملف المستخدم*\n━━━━━━━━━━━━━━━\n'
+            + (isDev ? '👑 *مطور البوت*\n' : '')
             + '📝 الاسم: ' + (u.name || '-') + '\n'
             + '🔗 يوزر: ' + (u.username ? '@' + u.username : '-') + '\n'
             + '🆔 ID: `' + u.id + '`\n'
@@ -544,13 +601,16 @@ async function startBot() {
             + '🚫 محظور: ' + (u.banned ? '✅ نعم' : '❌ لا') + '\n'
             + '🔇 مكتوم: ' + (u.muted ? '✅ نعم' : '❌ لا');
 
-        var kb = [
-            [{ text: u.banned ? '🔓 رفع الحظر' : '🔨 حظر', callback_data: 'do_' + (u.banned ? 'unban' : 'ban') + '_' + tid },
-             { text: u.muted ? '🔊 رفع الكتم' : '🔇 كتم', callback_data: 'do_' + (u.muted ? 'unmute' : 'mute') + '_' + tid }],
-            [{ text: '💬 مراسلة', callback_data: 'do_reply_' + tid }],
-            [{ text: '📜 عرض محادثاته', callback_data: 'user_msgs_' + tid + '_1' }],
-            [{ text: '🔙 رجوع', callback_data: 'users_1' }]
-        ];
+        var kb = [];
+        if (!isDev) {
+            kb.push([
+                { text: u.banned ? '🔓 رفع الحظر' : '🔨 حظر', callback_data: 'do_' + (u.banned ? 'unban' : 'ban') + '_' + tid },
+                { text: u.muted ? '🔊 رفع الكتم' : '🔇 كتم', callback_data: 'do_' + (u.muted ? 'unmute' : 'mute') + '_' + tid }
+            ]);
+        }
+        kb.push([{ text: '💬 مراسلة', callback_data: 'do_reply_' + tid }]);
+        kb.push([{ text: '📜 عرض محادثاته', callback_data: 'user_msgs_' + tid + '_1' }]);
+        kb.push([{ text: '🔙 رجوع', callback_data: 'users_1' }]);
 
         if (editMsgId) { try { await bot.editMessageText(text, { chat_id: chatId, message_id: editMsgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: kb } }); return; } catch (e) {} }
         await bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: kb } });
@@ -628,13 +688,13 @@ async function startBot() {
 
         if (msg.text && msg.text.startsWith('/')) return;
 
-        // ===== المطور أو الأدمن =====
+        // المطور أو الأدمن
         if (isAdminUser(userId)) {
             await handleAdminMsg(chatId, userId, msg);
             return;
         }
 
-        // ===== المستخدم العادي =====
+        // المستخدم العادي
         await updateUser(userId, userName, fullName);
         var user = await getUser(userId);
         if (user && user.banned) {
@@ -646,12 +706,7 @@ async function startBot() {
             return;
         }
 
-        // رسالة ترحيب (كل 3 ساعات فقط)
         var now = Date.now();
-        var THREE_HOURS = 3 * 60 * 60 * 1000;
-        var showWelcome = !lastWelcome[userId] || (now - lastWelcome[userId]) > THREE_HOURS;
-
-        // تحويل الرسالة للمطور وكل الأدمنية
         var time = formatTime(now);
         var report = '📨 *رسالة جديدة*\n━━━━━━━━━━━━━━━\n'
             + '👤 ' + (fullName || 'بدون اسم') + '\n'
@@ -687,10 +742,12 @@ async function startBot() {
         }
 
         if (forwarded) {
-            if (showWelcome) {
-                lastWelcome[userId] = now;
-                await bot.sendMessage(chatId, '✅ تم وصول رسالتك للأستاذ.\n📌 لم يفتح المحادثة الأستاذ بعد، أول ما يفتح المحادثة سوف نعلمك بذلك.');
-            }
+            await bot.sendMessage(chatId,
+                '✅ *تم استلام رسالتك!*\n\n'
+                + '📬 رسالتك وصلت للأستاذ وسيطلع عليها قريباً.\n'
+                + '⏳ سوف نعلمك فور فتح الأستاذ للمحادثة.',
+                { parse_mode: 'Markdown' }
+            );
         } else {
             await bot.sendMessage(chatId, '⚠️ حدث خطأ. حاول مرة أخرى.');
         }
@@ -702,12 +759,16 @@ async function startBot() {
 
         if (msg.text && msg.text.startsWith('/')) return;
 
-        // ===== إضافة أدمن بالـ ID =====
-        if (state.action === 'add_admin') {
+        // إضافة أدمن بالـ ID
+        if (state.action === 'add_admin' && isDeveloper(userId)) {
             devState[chatId] = {};
             var adminId = (msg.text || '').trim();
             if (!adminId || !/^\d+$/.test(adminId)) {
                 await bot.sendMessage(chatId, '⚠️ أرسل ID صحيح (أرقام فقط).', { reply_markup: { inline_keyboard: [[{ text: '🔙 رجوع', callback_data: 'admin_panel' }]] } });
+                return;
+            }
+            if (String(adminId) === developerId) {
+                await bot.sendMessage(chatId, '⛔ المطور لا يُضاف كأدمن.');
                 return;
             }
             await addAdmin(adminId, userId);
@@ -716,7 +777,7 @@ async function startBot() {
             return;
         }
 
-        // ===== رسالة جماعية =====
+        // رسالة جماعية
         if (state.action === 'broadcast') {
             devState[chatId] = {};
             var all = (await getAllUsers()).filter(function(u) { return !u.banned && u.id; });
@@ -729,12 +790,20 @@ async function startBot() {
             return;
         }
 
-        // ===== رد على مستخدم =====
+        // رد على مستخدم
         if (state.action === 'reply' && state.targetId) {
             var target = state.targetId;
             devState[chatId] = {};
             try {
                 await bot.copyMessage(target, chatId, msg.message_id);
+                // إشعار المستخدم بالرد
+                try {
+                    await bot.sendMessage(target,
+                        '💬 *وصلك رد من الأستاذ*\n\n'
+                        + '⬇️ الرد أعلاه من الأستاذ المختص.',
+                        { parse_mode: 'Markdown' }
+                    );
+                } catch (e) {}
                 await bot.sendMessage(chatId, '✅ تم إرسال الرد للمستخدم `' + target + '`', {
                     parse_mode: 'Markdown',
                     reply_markup: { inline_keyboard: [
@@ -748,13 +817,21 @@ async function startBot() {
             return;
         }
 
-        // ===== رد عبر Reply على رسالة محولة =====
+        // رد عبر Reply على رسالة محولة
         if (msg.reply_to_message) {
             var repliedMsgId = msg.reply_to_message.message_id;
             var targetUserId = await getUserByFwdMsg(repliedMsgId, chatId);
             if (targetUserId) {
                 try {
                     await bot.copyMessage(targetUserId, chatId, msg.message_id);
+                    // إشعار المستخدم
+                    try {
+                        await bot.sendMessage(targetUserId,
+                            '💬 *وصلك رد من الأستاذ*\n\n'
+                            + '⬇️ الرد أعلاه من الأستاذ المختص.',
+                            { parse_mode: 'Markdown' }
+                        );
+                    } catch (e) {}
                     await bot.sendMessage(chatId, '✅ تم إرسال الرد للمستخدم `' + targetUserId + '`', {
                         parse_mode: 'Markdown',
                         reply_markup: { inline_keyboard: [
@@ -778,7 +855,7 @@ async function startBot() {
 
 // ===== Express + Keep-Alive =====
 var app = express();
-app.get('/', function(req, res) { res.send('Contact Bot is running!'); });
+app.get('/', function(req, res) { res.send('Teachers Bot is running! 🎓'); });
 app.get('/health', function(req, res) { res.json({ status: 'ok', time: new Date().toISOString() }); });
 var port = process.env.PORT || 3000;
 var serverUrl = process.env.RENDER_EXTERNAL_URL || ('http://localhost:' + port);

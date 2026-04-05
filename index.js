@@ -75,10 +75,14 @@ async function initDB() {
             created_at BIGINT DEFAULT 0,
             completed_at BIGINT DEFAULT 0,
             rating INT DEFAULT 0,
+            admin_reply_count INT DEFAULT 0,
+            user_locked TINYINT(1) DEFAULT 0,
             INDEX idx_user (user_id),
             INDEX idx_claimed (claimed_by),
             INDEX idx_status (status)
         ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+        try { await conn.execute('ALTER TABLE tickets ADD COLUMN admin_reply_count INT DEFAULT 0'); } catch(e) {}
+        try { await conn.execute('ALTER TABLE tickets ADD COLUMN user_locked TINYINT(1) DEFAULT 0'); } catch(e) {}
 
         // جدول سجل أحداث التذاكر (محادثة الأستاذ مع العميل)
         await conn.execute(`CREATE TABLE IF NOT EXISTS ticket_events (
@@ -1113,9 +1117,13 @@ async function startBot() {
                 if (a.username) aName += ' @' + a.username;
                 var multiLabel = a.multi_reply ? ' 🔓متعدد' : '';
                 text += '• ' + aName + multiLabel + ' (ID: `' + a.user_id + '`)\n';
+                var rmData = 'rm_admin_' + a.user_id;
+                if (rmData.length > 50) rmData = await saveCB(rmData);
+                var toggleData = 'toggle_multi_' + a.user_id;
+                if (toggleData.length > 50) toggleData = await saveCB(toggleData);
                 btns.push([
-                    { text: '❌ إزالة ' + (a.name || a.user_id), callback_data: await saveCB('rm_admin_' + a.user_id) },
-                    { text: (a.multi_reply ? '🔒 سحب متعدد' : '🔓 منح متعدد'), callback_data: await saveCB('toggle_multi_' + a.user_id) }
+                    { text: '❌ إزالة ' + (a.name || a.user_id), callback_data: rmData },
+                    { text: (a.multi_reply ? '🔒 سحب متعدد' : '🔓 منح متعدد'), callback_data: toggleData }
                 ]);
             }
         } else {
@@ -1408,12 +1416,13 @@ async function startBot() {
         try { var sgc = await query('SELECT COUNT(*) as cnt FROM suggestions WHERE user_id=?', [String(tid)]); suggCount = sgc[0] ? sgc[0].cnt : 0; } catch (e) {}
 
         var isDev = String(tid) === developerId;
+        var isViewerDev = isDeveloper(chatId);
         var text = '👤 *ملف المستخدم*\n━━━━━━━━━━━━━━━\n'
             + (isDev ? '👑 *مطور البوت*\n' : '')
             + '📝 الاسم: ' + (u.name || '-') + '\n'
             + '🔗 يوزر: ' + (u.username ? '@' + u.username : '-') + '\n'
-            + '🆔 ID: `' + u.id + '`\n'
-            + (u.phone ? '📱 الهاتف: ' + u.phone + '\n' : '')
+            + (isViewerDev ? '🆔 ID: `' + u.id + '`\n' : '')
+            + (isViewerDev && u.phone ? '📱 الهاتف: ' + u.phone + '\n' : '')
             + '━━━━━━━━━━━━━━━\n'
             + '📨 إجمالي الرسائل: ' + msgCount + '\n'
             + '📅 رسائل اليوم: ' + todayMsgs + '\n'
@@ -1452,9 +1461,25 @@ async function startBot() {
         var offset = (page - 1) * perPage;
 
         var msgs = [];
-        try { msgs = await query('SELECT * FROM msg_map WHERE user_id=? ORDER BY ts DESC LIMIT ? OFFSET ?', [String(tid), perPage, offset]); } catch (e) {}
+        try {
+            msgs = await query(
+                'SELECT te.*, t.id as ticket_id FROM ticket_events te ' +
+                'LEFT JOIN tickets t ON te.ticket_id = t.id ' +
+                'WHERE t.user_id=? AND te.event_type="message" ' +
+                'ORDER BY te.ts DESC LIMIT ? OFFSET ?',
+                [String(tid), perPage, offset]
+            );
+        } catch (e) {}
         var total = 0;
-        try { var tc = await query('SELECT COUNT(*) as cnt FROM msg_map WHERE user_id=?', [String(tid)]); total = tc[0] ? tc[0].cnt : 0; } catch (e) {}
+        try {
+            var tc = await query(
+                'SELECT COUNT(*) as cnt FROM ticket_events te ' +
+                'LEFT JOIN tickets t ON te.ticket_id = t.id ' +
+                'WHERE t.user_id=? AND te.event_type="message"',
+                [String(tid)]
+            );
+            total = tc[0] ? tc[0].cnt : 0;
+        } catch (e) {}
         var totalPages = Math.ceil(total / perPage) || 1;
 
         var text = '📜 *محادثات: ' + uName + '*\n📊 ' + total + ' رسالة | صفحة ' + page + '/' + totalPages + '\n━━━━━━━━━━━━━━━\n\n';
@@ -1463,7 +1488,15 @@ async function startBot() {
             text += '📭 لا توجد رسائل.';
         } else {
             for (var i = 0; i < msgs.length; i++) {
-                text += '📨 رسالة #' + msgs[i].id + ' | 🕒 ' + formatTime(msgs[i].ts) + '\n\n';
+                var m = msgs[i];
+                var roleIcon = m.role === 'admin' ? '👨‍💼' : '👤';
+                var roleName = m.role === 'admin' ? 'الأستاذ' : uName;
+                var msgContent = (m.content || '').substring(0, 150);
+                if (m.content && m.content.length > 150) msgContent += '...';
+                text += roleIcon + ' *' + roleName + '*\n';
+                text += '┌─────────────────\n';
+                text += '│ ' + msgContent.replace(/\n/g, '\n│ ') + '\n';
+                text += '└─ 🕒 ' + formatTime(m.ts) + '\n\n';
             }
         }
 
@@ -1523,10 +1556,11 @@ async function startBot() {
                 return;
             }
             await query('UPDATE users SET phone=?, verified=1 WHERE id=?', [msg.contact.phone_number, userId]);
-            await bot.sendMessage(chatId, '✅ تم التحقق من هويتك بنجاح! يمكنك الآن متابعة طلبك.', { reply_markup: { remove_keyboard: true } });
-            
+            await query('UPDATE tickets SET user_locked=0 WHERE user_id=? AND status="open"', [userId]);
+            await bot.sendMessage(chatId, '✅ تم التحقق من هويتك بنجاح! يمكنك الآن متابعة طلبك وإرسال رسائلك.', { reply_markup: { remove_keyboard: true } });
+
             // إشعار المطور
-            await bot.sendMessage(developerId, 
+            await bot.sendMessage(developerId,
                 '🆕 *تحقق جديد بجهة اتصال*\n━━━━━━━━━━━━━━━\n' +
                 '👤 الاسم: ' + fullName + '\n' +
                 '🆔 ID: `' + userId + '`\n' +
@@ -1555,18 +1589,36 @@ async function startBot() {
             return;
         }
 
+        var userOpenTicket = await getOpenTicket(userId);
+        if (userOpenTicket && userOpenTicket.user_locked === 1 && (!user || !user.verified)) {
+            await bot.sendMessage(chatId,
+                '⚠️ *يجب التحقق من هويتك للمتابعة*\n━━━━━━━━━━━━━━━\n\n'
+                + '🔐 لضمان جودة الخدمة وحماية البوت، يرجى التحقق من هويتك بمشاركة جهة اتصالك.\n\n'
+                + '⏳ لن تتمكن من إرسال رسائل جديدة حتى تتحقق.',
+                {
+                    parse_mode: 'Markdown',
+                    reply_markup: {
+                        keyboard: [[{ text: '✅ تحقق من هويتي 👤', request_contact: true }]],
+                        resize_keyboard: true,
+                        one_time_keyboard: true
+                    }
+                }
+            );
+            return;
+        }
+
         // التحقق من الهوية للمستخدمين الجدد
-        if (user && !user.verified) {
-            await bot.sendMessage(chatId, 
+        if (user && !user.verified && (!userOpenTicket || userOpenTicket.admin_reply_count === 0)) {
+            await bot.sendMessage(chatId,
                 '⚠️ *يجب التحقق من هويتك أولاً*\n━━━━━━━━━━━━━━━\n' +
                 'لضمان جودة الخدمة ومنع الحسابات الوهمية، يرجى الضغط على الزر أدناه لمشاركة جهة اتصالك الحقيقية.',
-                { 
-                    parse_mode: 'Markdown', 
-                    reply_markup: { 
+                {
+                    parse_mode: 'Markdown',
+                    reply_markup: {
                         keyboard: [[{ text: '✅ اضغط هنا للتحقق 👤', request_contact: true }]],
                         resize_keyboard: true,
                         one_time_keyboard: true
-                    } 
+                    }
                 }
             );
             return;
@@ -1604,12 +1656,6 @@ async function startBot() {
 
         var now = Date.now();
         var time = formatTime(now);
-        var report = '📨 *رسالة جديدة*\n━━━━━━━━━━━━━━━\n'
-            + '👤 ' + (fullName || 'بدون اسم') + '\n'
-            + '🔗 ' + (userName ? '@' + userName : 'بدون يوزر') + '\n'
-            + '🆔 `' + userId + '`\n'
-            + '📞 `' + (user.phone || 'غير متوفر') + '`\n'
-            + '🕒 ' + time + '\n━━━━━━━━━━━━━━━';
 
         var ticketId = await createTicket(userId);
 
@@ -1630,24 +1676,42 @@ async function startBot() {
             ]
         ]};
 
-        var recipients = [developerId];
         var admins = await getAdminList();
-        for (var i = 0; i < admins.length; i++) {
-            if (admins[i].user_id !== developerId) recipients.push(admins[i].user_id);
-        }
-
         pendingNotify[String(userId)] = { notified: false, ts: now };
 
         var forwarded = false;
-        for (var j = 0; j < recipients.length; j++) {
+
+        try {
+            var reportDev = '📨 *رسالة جديدة*\n━━━━━━━━━━━━━━━\n'
+                + '👤 ' + (fullName || 'بدون اسم') + '\n'
+                + '🔗 ' + (userName ? '@' + userName : 'بدون يوزر') + '\n'
+                + '🆔 `' + userId + '`\n'
+                + '📞 `' + (user.phone || 'غير متوفر') + '`\n'
+                + '🕒 ' + time + '\n━━━━━━━━━━━━━━━';
+            await bot.sendMessage(developerId, reportDev, { parse_mode: 'Markdown' });
+            var fwdDev = await bot.forwardMessage(developerId, chatId, msg.message_id);
+            await saveMsgMap(userId, msg.message_id, fwdDev.message_id, developerId);
+            await bot.sendMessage(developerId, '⬆️ من: *' + (fullName || 'مستخدم') + '*', { parse_mode: 'Markdown', reply_markup: quickBtns });
+            forwarded = true;
+        } catch (e) {
+            console.log('فشل التحويل للمطور: ' + e.message);
+        }
+
+        var reportAdmin = '📨 *رسالة جديدة*\n━━━━━━━━━━━━━━━\n'
+            + '👤 ' + (fullName || 'بدون اسم') + '\n'
+            + '🔗 ' + (userName ? '@' + userName : 'بدون يوزر') + '\n'
+            + '🕒 ' + time + '\n━━━━━━━━━━━━━━━';
+
+        for (var i = 0; i < admins.length; i++) {
+            if (admins[i].user_id === developerId) continue;
             try {
-                await bot.sendMessage(recipients[j], report, { parse_mode: 'Markdown' });
-                var fwd = await bot.forwardMessage(recipients[j], chatId, msg.message_id);
-                await saveMsgMap(userId, msg.message_id, fwd.message_id, recipients[j]);
-                await bot.sendMessage(recipients[j], '⬆️ من: *' + (fullName || 'مستخدم') + '*', { parse_mode: 'Markdown', reply_markup: quickBtns });
+                await bot.sendMessage(admins[i].user_id, reportAdmin, { parse_mode: 'Markdown' });
+                var fwdAdmin = await bot.forwardMessage(admins[i].user_id, chatId, msg.message_id);
+                await saveMsgMap(userId, msg.message_id, fwdAdmin.message_id, admins[i].user_id);
+                await bot.sendMessage(admins[i].user_id, '⬆️ من: *' + (fullName || 'مستخدم') + '*', { parse_mode: 'Markdown', reply_markup: quickBtns });
                 forwarded = true;
             } catch (e) {
-                console.log('فشل التحويل لـ ' + recipients[j] + ': ' + e.message);
+                console.log('فشل التحويل للأدمن ' + admins[i].user_id + ': ' + e.message);
             }
         }
 
@@ -1773,13 +1837,41 @@ async function startBot() {
                 await bot.copyMessage(target, chatId, msg.message_id);
                 // تحديث إحصائيات الأدمن
                 await query('UPDATE admins SET helped_count = helped_count + 1 WHERE user_id = ?', [String(userId)]);
-                
+
                 // حفظ رد الأدمن في سجل التذكرة
                 var targetTicket = await getOpenTicket(target);
                 if (targetTicket) {
                     var adminReplyUser = await getUser(userId);
                     var replyContent = msg.text || (msg.photo ? '[صورة]' : msg.video ? '[فيديو]' : msg.document ? '[ملف]' : msg.voice ? '[صوت]' : '[محتوى]');
                     await saveTicketEvent(targetTicket.id, userId, 'admin', 'message', replyContent);
+
+                    await query('UPDATE tickets SET admin_reply_count = admin_reply_count + 1 WHERE id = ?', [targetTicket.id]);
+                    var newCount = (targetTicket.admin_reply_count || 0) + 1;
+
+                    if (newCount === 2) {
+                        setTimeout(async function() {
+                            var targetUserObj = await getUser(target);
+                            if (!targetUserObj || targetUserObj.verified) {
+                                return;
+                            }
+                            await query('UPDATE tickets SET user_locked = 1 WHERE id = ?', [targetTicket.id]);
+                            try {
+                                await bot.sendMessage(target,
+                                    '⚠️ *يجب التحقق من هويتك للمتابعة*\n━━━━━━━━━━━━━━━\n\n'
+                                    + '🔐 لضمان جودة الخدمة وحماية البوت، يرجى التحقق من هويتك بمشاركة جهة اتصالك.\n\n'
+                                    + '⏳ لن تتمكن من إرسال رسائل جديدة حتى تتحقق.',
+                                    {
+                                        parse_mode: 'Markdown',
+                                        reply_markup: {
+                                            keyboard: [[{ text: '✅ تحقق من هويتي 👤', request_contact: true }]],
+                                            resize_keyboard: true,
+                                            one_time_keyboard: true
+                                        }
+                                    }
+                                );
+                            } catch (e) {}
+                        }, 5000);
+                    }
                 }
                 try {
                     await bot.sendMessage(target,
@@ -1812,6 +1904,34 @@ async function startBot() {
                     if (replyTicket) {
                         var replyMsgContent = msg.text || (msg.photo ? '[صورة]' : msg.video ? '[فيديو]' : msg.document ? '[ملف]' : msg.voice ? '[صوت]' : '[محتوى]');
                         await saveTicketEvent(replyTicket.id, userId, 'admin', 'message', replyMsgContent);
+
+                        await query('UPDATE tickets SET admin_reply_count = admin_reply_count + 1 WHERE id = ?', [replyTicket.id]);
+                        var newCount2 = (replyTicket.admin_reply_count || 0) + 1;
+
+                        if (newCount2 === 2) {
+                            setTimeout(async function() {
+                                var targetUserObj2 = await getUser(targetUserId);
+                                if (!targetUserObj2 || targetUserObj2.verified) {
+                                    return;
+                                }
+                                await query('UPDATE tickets SET user_locked = 1 WHERE id = ?', [replyTicket.id]);
+                                try {
+                                    await bot.sendMessage(targetUserId,
+                                        '⚠️ *يجب التحقق من هويتك للمتابعة*\n━━━━━━━━━━━━━━━\n\n'
+                                        + '🔐 لضمان جودة الخدمة وحماية البوت، يرجى التحقق من هويتك بمشاركة جهة اتصالك.\n\n'
+                                        + '⏳ لن تتمكن من إرسال رسائل جديدة حتى تتحقق.',
+                                        {
+                                            parse_mode: 'Markdown',
+                                            reply_markup: {
+                                                keyboard: [[{ text: '✅ تحقق من هويتي 👤', request_contact: true }]],
+                                                resize_keyboard: true,
+                                                one_time_keyboard: true
+                                            }
+                                        }
+                                    );
+                                } catch (e) {}
+                            }, 5000);
+                        }
                     }
                     try {
                         await bot.sendMessage(targetUserId,

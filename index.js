@@ -1,7 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 
 // ===== إعدادات =====
-const BOT_TOKEN = '8798272294:AAEY_LIYnVRIY2T-WUP63duCn5V7VFgGsCE';
+const BOT_TOKEN = '7153051636:AAF5QHDdWBtK046BxtUlZ96I8N5Q50pEFKg';
 const DEVELOPER_ID = '7411444902'; // غيرها
 
 // ===== تخزين مؤقت (في الذاكرة) =====

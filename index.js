@@ -1,18 +1,29 @@
 const TelegramBot = require('node-telegram-bot-api');
 
 // ===== إعدادات =====
-const BOT_TOKEN = '7153051636:AAF5QHDdWBtK046BxtUlZ96I8N5Q50pEFKg';
+const BOT_TOKEN = 'توكن_بوتك_هنا';
 const DEVELOPER_ID = '7411444902'; // غيرها
 
 // ===== تخزين مؤقت (في الذاكرة) =====
 const admins = new Set([DEVELOPER_ID]);           // قائمة الأدمنية
 const pendingTickets = new Map();                 // ticketId -> { userId, claimedBy, status }
 const userStates = new Map();                     // حالة المستخدم الحالية
+const verifiedUsers = new Set();                  // مستخدمين تم التحقق منهم
+
+// ===== دالة توليد كلمة سر قوية =====
+function generateStrongPassword(length = 16) {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=[]{}|;:,.<>?';
+    let password = '';
+    for (let i = 0; i < length; i++) {
+        password += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return password;
+}
 
 // ===== البوت =====
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-console.log('🤖 البوت المصغر يعمل...');
+console.log('🤖 البوت المصغر (مع كلمة سر وتحقق) يعمل...');
 
 // ===== أمر /start =====
 bot.onText(/\/start/, async (msg) => {
@@ -33,7 +44,8 @@ bot.onText(/\/start/, async (msg) => {
                 reply_markup: {
                     inline_keyboard: [
                         [{ text: '👥 إدارة الأدمنية', callback_data: 'admin_panel' }],
-                        [{ text: '📊 إحصائيات', callback_data: 'stats' }]
+                        [{ text: '📊 إحصائيات', callback_data: 'stats' }],
+                        [{ text: '🔐 توليد كلمة سر قوية', callback_data: 'gen_password' }]
                     ]
                 }
             }
@@ -42,8 +54,16 @@ bot.onText(/\/start/, async (msg) => {
         // مستخدم عادي
         await bot.sendMessage(chatId,
             `🎓 *مرحباً ${name}*\n\n` +
-            `📩 أرسل سؤالك أو طلبك هنا مباشرة وسيصل للأستاذ.`,
-            { parse_mode: 'Markdown' }
+            `📩 أرسل سؤالك أو طلبك هنا مباشرة وسيصل للأستاذ.\n\n` +
+            `🔐 يمكنك الحصول على كلمة سر قوية بالضغط على الزر أدناه.`,
+            {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: '🔐 توليد كلمة سر قوية', callback_data: 'gen_password' }]
+                    ]
+                }
+            }
         );
     }
 });
@@ -80,7 +100,8 @@ bot.on('message', async (msg) => {
                 `📨 *رسالة جديدة*\n━━━━━━━━━━━━━━━\n` +
                 `👤 ${name} ${username}\n` +
                 `🆔 \`${userId}\`\n` +
-                `🎫 رقم التذكرة: \`${ticketId}\``,
+                `🎫 رقم التذكرة: \`${ticketId}\`\n` +
+                (verifiedUsers.has(userId) ? '✅ *تم التحقق*' : '⚠️ *لم يتم التحقق بعد*'),
                 { parse_mode: 'Markdown' }
             );
             // إعادة توجيه الرسالة نفسها
@@ -102,8 +123,40 @@ bot.on('message', async (msg) => {
         }
     }
 
-    // رد للمستخدم
-    await bot.sendMessage(chatId, '✅ تم استلام رسالتك، سيتم الرد قريباً.');
+    // رد للمستخدم مع زر التحقق إذا لم يتحقق بعد
+    const replyMarkup = verifiedUsers.has(userId) ? undefined : {
+        inline_keyboard: [
+            [{ text: '📱 تحقق أنك إنسان - شارك جهة اتصالك', request_contact: true }]
+        ]
+    };
+
+    await bot.sendMessage(chatId, '✅ تم استلام رسالتك، سيتم الرد قريباً.', { reply_markup: replyMarkup });
+});
+
+// ===== معالجة مشاركة جهة الاتصال (التحقق) =====
+bot.on('contact', async (msg) => {
+    const userId = String(msg.from.id);
+    const chatId = msg.chat.id;
+
+    // تسجيل أن المستخدم قد تحقق
+    verifiedUsers.add(userId);
+
+    await bot.sendMessage(chatId,
+        '✅ *تم التحقق من هويتك بنجاح!*\n\n' +
+        'شكراً لمشاركة جهة اتصالك. أنت الآن إنسان موثوق.',
+        { parse_mode: 'Markdown' }
+    );
+
+    // إشعار المطور
+    try {
+        await bot.sendMessage(DEVELOPER_ID,
+            `🔐 *تحقق مستخدم جديد*\n` +
+            `👤 ${msg.from.first_name || ''} ${msg.from.last_name || ''}\n` +
+            `📞 ${msg.contact.phone_number}\n` +
+            `🆔 \`${userId}\``,
+            { parse_mode: 'Markdown' }
+        );
+    } catch (e) {}
 });
 
 // ===== معالجة ردود الأدمن =====
@@ -132,7 +185,8 @@ async function handleAdminMessage(msg) {
     await bot.sendMessage(chatId, 'استخدم الأزرار للتحكم.', {
         reply_markup: {
             inline_keyboard: [
-                [{ text: '👥 إدارة الأدمنية', callback_data: 'admin_panel' }]
+                [{ text: '👥 إدارة الأدمنية', callback_data: 'admin_panel' }],
+                [{ text: '🔐 توليد كلمة سر قوية', callback_data: 'gen_password' }]
             ]
         }
     });
@@ -145,6 +199,18 @@ bot.on('callback_query', async (cbq) => {
     const data = cbq.data;
 
     await bot.answerCallbackQuery(cbq.id);
+
+    // === توليد كلمة سر (للجميع) ===
+    if (data === 'gen_password') {
+        const password = generateStrongPassword(16);
+        await bot.sendMessage(chatId,
+            `🔐 *كلمة السر القوية:*\n\n` +
+            `\`${password}\`\n\n` +
+            `⚠️ احفظها في مكان آمن ولا تشاركها مع أحد.`,
+            { parse_mode: 'Markdown' }
+        );
+        return;
+    }
 
     // === رد على مستخدم ===
     if (data.startsWith('reply_')) {
@@ -232,6 +298,7 @@ bot.on('callback_query', async (cbq) => {
             `📊 *إحصائيات*\n━━━━━━━━━━━━━━━\n` +
             `👨‍💼 عدد الأدمنية: ${admins.size}\n` +
             `🎫 التذاكر المفتوحة: ${openCount}\n` +
+            `✅ مستخدمين محققين: ${verifiedUsers.size}\n` +
             `💾 التخزين: مؤقت (في الذاكرة)`,
             { chat_id: chatId, message_id: cbq.message.message_id, parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🔙 رجوع', callback_data: 'main_menu' }]] } }
         );
@@ -248,7 +315,8 @@ bot.on('callback_query', async (cbq) => {
                 reply_markup: {
                     inline_keyboard: [
                         [{ text: '👥 إدارة الأدمنية', callback_data: 'admin_panel' }],
-                        [{ text: '📊 إحصائيات', callback_data: 'stats' }]
+                        [{ text: '📊 إحصائيات', callback_data: 'stats' }],
+                        [{ text: '🔐 توليد كلمة سر قوية', callback_data: 'gen_password' }]
                     ]
                 }
             }

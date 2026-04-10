@@ -15,7 +15,7 @@ from openai import OpenAI
 #  ⚙️  الإعدادات الأساسية
 # ============================================================
 # يرجى وضع التوكن الخاص بك في متغيرات البيئة أو استبدالها هنا مباشرة
-BOT_TOKEN    = os.getenv('BOT_TOKEN', '7153051636:AAF5QHDdWBtK046BxtUlZ96I8N5Q50pEFKg')
+BOT_TOKEN    = os.getenv('BOT_TOKEN', '7630845149:AAGwRUURpAA4ZqQhMH7W1wz6IV4iDaRN4Kw')
 DEVELOPER_ID = os.getenv('DEVELOPER_ID', '7411444902')
 # تم استبدال DeepSeek بـ OpenAI (ChatGPT) كما طلبت
 OPENAI_KEY   = os.getenv('OPENAI_API_KEY', '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')

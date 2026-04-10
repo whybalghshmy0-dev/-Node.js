@@ -7,13 +7,18 @@ import string
 import os
 from datetime import datetime
 from openai import OpenAI
+from flask import Flask
+import threading
 
 # ============================================================
 #  ⚙️  الإعدادات الأساسية
 # ============================================================
 BOT_TOKEN    = os.getenv('BOT_TOKEN', '7630845149:AAGwRUURpAA4ZqQhMH7W1wz6IV4iDaRN4Kw')
 DEVELOPER_ID = os.getenv('DEVELOPER_ID', '7411444902')
-OPENAI_KEY   = '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'
+OPENAI_KEY   = os.getenv('OPENAI_API_KEY')  # يُسحب من متغيرات البيئة في Render
+
+if not OPENAI_KEY:
+    raise ValueError("❌ OPENAI_API_KEY غير موجود في متغيرات البيئة!")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 client = OpenAI(api_key=OPENAI_KEY)
@@ -74,6 +79,12 @@ def generate_password(length=16):
     random.shuffle(password)
     return ''.join(password)
 
+def generate_email():
+    domains = ['gmail.com', 'outlook.com', 'yahoo.com', 'proton.me', 'mail.com', 'icloud.com']
+    words = ['hero', 'star', 'wolf', 'ninja', 'cyber', 'tech', 'dev', 'pro', 'alpha', 'ghost']
+    user = f"{random.choice(words)}.{random.choice(words)}{random.randint(100, 9999)}"
+    return f"{user}@{random.choice(domains)}"
+
 def split_long_message(text, max_len=4096):
     return [text[i:i+max_len] for i in range(0, len(text), max_len)]
 
@@ -111,7 +122,9 @@ def main_menu_kb(user_id):
         types.InlineKeyboardButton("🧠 ذكاء لبيب (ChatGPT)", callback_data="ai_chat"),
         types.InlineKeyboardButton("🔐 توليد كلمة سر قوية", callback_data="gen_password")
     )
-    # زر التحقق من الإنسان (يظهر فقط إذا لم يتحقق بعد)
+    kb.add(
+        types.InlineKeyboardButton("📧 بريد مؤقت", callback_data="email_menu")
+    )
     if str(user_id) not in verified_users:
         kb.add(types.InlineKeyboardButton("📱 تحقق أنك إنسان (شارك جهة اتصالك)", callback_data="verify_human"))
     kb.add(
@@ -142,7 +155,6 @@ def start(message):
     )
     bot.send_message(message.chat.id, welcome_text, reply_markup=main_menu_kb(uid))
 
-# ===== معالج أزرار القائمة =====
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
     uid = str(call.from_user.id)
@@ -180,8 +192,15 @@ def handle_query(call):
                types.InlineKeyboardButton("🔙 رجوع", callback_data="main_menu"))
         bot.edit_message_text(text, chat_id, msg_id, parse_mode="Markdown", reply_markup=kb)
 
+    elif call.data == "email_menu":
+        email = generate_email()
+        text = f"📧 *بريدك المؤقت الجديد:*\n\n`{email}`\n\n(اضغط على البريد لنسخه)"
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("🔄 توليد آخر", callback_data="email_menu"),
+               types.InlineKeyboardButton("🔙 رجوع", callback_data="main_menu"))
+        bot.edit_message_text(text, chat_id, msg_id, parse_mode="Markdown", reply_markup=kb)
+
     elif call.data == "verify_human":
-        # إرسال زر يطلب مشاركة جهة الاتصال
         kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
         kb.add(types.KeyboardButton("📱 مشاركة جهة الاتصال", request_contact=True))
         bot.send_message(chat_id, "📱 الرجاء الضغط على الزر أدناه لمشاركة جهة اتصالك للتحقق:", reply_markup=kb)
@@ -220,7 +239,9 @@ def handle_query(call):
         bot.edit_message_text("📢 أرسل الرسالة التي تريد إذاعتها لجميع المستخدمين:", chat_id, msg_id,
                              reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("❌ إلغاء", callback_data="admin_panel")))
 
-# ===== معالج استقبال جهة الاتصال =====
+# ============================================================
+#  📱  معالج استقبال جهة الاتصال (التحقق من الإنسان)
+# ============================================================
 @bot.message_handler(content_types=['contact'])
 def handle_contact(message):
     uid = str(message.from_user.id)
@@ -230,11 +251,9 @@ def handle_contact(message):
     if uid in user_stats:
         user_stats[uid]['phone'] = phone
     
-    # إزالة لوحة المفاتيح المخصصة
     bot.send_message(message.chat.id, "✅ *تم التحقق من هويتك بنجاح!*\n\nشكراً لمشاركة جهة اتصالك. أنت الآن إنسان موثوق.",
                      parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
     
-    # إشعار المطور
     try:
         bot.send_message(DEVELOPER_ID,
             f"🔐 *تحقق مستخدم جديد*\n"
@@ -244,10 +263,11 @@ def handle_contact(message):
             parse_mode="Markdown")
     except: pass
 
-    # العودة للقائمة الرئيسية
     bot.send_message(message.chat.id, "يمكنك الآن متابعة استخدام البوت:", reply_markup=main_menu_kb(uid))
 
-# ===== معالج الرسائل النصية =====
+# ============================================================
+#  💬  معالج الرسائل النصية
+# ============================================================
 @bot.message_handler(func=lambda m: True)
 def handle_messages(message):
     uid = str(message.from_user.id)
@@ -261,7 +281,6 @@ def handle_messages(message):
     if state == 'ai_chat':
         sent = bot.reply_to(message, "🤔 جاري التفكير بعمق...")
         answer = ask_ai(uid, message.text)
-        # تقطيع الرد إذا كان طويلاً
         for chunk in split_long_message(answer):
             bot.send_message(message.chat.id, chunk)
         bot.delete_message(message.chat.id, sent.message_id)
@@ -297,12 +316,25 @@ def handle_messages(message):
         bot.send_message(message.chat.id, f"✅ تم الانتهاء! وصلت الرسالة لـ {count} مستخدم.")
 
     else:
-        # لا يوجد حالة نشطة - عرض القائمة الرئيسية
         bot.send_message(message.chat.id, "الرجاء اختيار خيار من القائمة:", reply_markup=main_menu_kb(uid))
+
+# ============================================================
+#  🌐  Flask Server (لإبقاء البوت حياً على Render)
+# ============================================================
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "✅ لبيب بوت يعمل!"
+
+def run_flask():
+    port = int(os.environ.get('PORT', 3000))
+    app.run(host='0.0.0.0', port=port)
 
 # ============================================================
 #  🏁  التشغيل
 # ============================================================
 if __name__ == "__main__":
     print("🚀 لبيب بوت (نسخة OpenAI) يعمل الآن...")
+    threading.Thread(target=run_flask).start()
     bot.polling(none_stop=True)

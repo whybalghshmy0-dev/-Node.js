@@ -13,7 +13,7 @@ from openai import OpenAI
 # ============================================================
 BOT_TOKEN    = os.getenv('BOT_TOKEN', '7630845149:AAGwRUURpAA4ZqQhMH7W1wz6IV4iDaRN4Kw')
 DEVELOPER_ID = os.getenv('DEVELOPER_ID', '7411444902')
-OPENAI_KEY   = os.getenv('OPENAI_API_KEY', 'your-openai-key-here')
+OPENAI_KEY   = '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'
 
 bot = telebot.TeleBot(BOT_TOKEN)
 client = OpenAI(api_key=OPENAI_KEY)

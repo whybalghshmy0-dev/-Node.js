@@ -1,4 +1,4 @@
 pyTelegramBotAPI
+openai
 requests
 python-dotenv
-mysql-connector-python

@@ -11,7 +11,7 @@ const http        = require('http');
 // ============================================================
 //  ⚙️  الإعدادات الأساسية
 // ============================================================
-const BOT_TOKEN    = process.env.BOT_TOKEN    || 'توكن_بوتك_هنا';
+const BOT_TOKEN    = process.env.BOT_TOKEN    || '7153051636:AAF5QHDdWBtK046BxtUlZ96I8N5Q50pEFKg';
 const DEVELOPER_ID = process.env.DEVELOPER_ID || '7411444902';
 const DEEPSEEK_KEY = process.env.DEEPSEEK_KEY || 'sk-21eae79ebc564eb19199fb9d784e6ac5';
 

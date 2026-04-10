@@ -1,4 +1,0 @@
-pyTelegramBotAPI
-requests
-python-dotenv
-mysql-connector-python

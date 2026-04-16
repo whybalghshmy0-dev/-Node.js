@@ -425,43 +425,44 @@ async def run_api():
     await site.start()
     logger.info(f"🌐 API يعمل على المنفذ {API_PORT}")
 
-# ==================== التشغيل الرئيسي ====================
-async def main():
-    await init_db()
-    
-    # تشغيل API في الخلفية
-    asyncio.create_task(run_api())
-    
+# ==================== التشغيل الرئيسي الصحيح 100% ====================
+def main():
+    # 1. بناء التطبيق (بدون استخدام async هنا لتجنب تعارض الـ Loop)
     app = Application.builder().token(TOKEN).build()
     
-    # أوامر عامة
+    # 2. إضافة الأوامر
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("categories", categories))
     app.add_handler(CommandHandler("view", view_category))
-    
-    # أوامر المطور
     app.add_handler(CommandHandler("newcategory", new_category))
     app.add_handler(CommandHandler("deletecategory", delete_category))
     app.add_handler(CommandHandler("deleteitem", delete_item))
     app.add_handler(CommandHandler("broadcast", broadcast))
     
-    # محادثة الإضافة (مصححة)
-    conv_handler = ConversationHandler(
+    app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("add", add_start)],
         states={
             WAITING_FOR_CATEGORY: [CallbackQueryHandler(category_chosen, pattern="^(cat_|cancel)")],
             WAITING_FOR_CONTENT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_content),
-                MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.AUDIO | filters.Document.VIDEO | filters.VOICE, receive_content),
+                MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.VOICE, receive_content),
                 CommandHandler("cancel", cancel)
             ]
         },
         fallbacks=[CommandHandler("cancel", cancel)],
-    )
-    app.add_handler(conv_handler)
-    
-    logger.info("🤖 البوت يعمل الآن...")
-    await app.run_polling()
+    ))
+
+    # 3. دالة تهيئة لتشغيل الـ API وقاعدة البيانات داخل حلقة البوت
+    async def post_init(application: Application):
+        await init_db()
+        asyncio.create_task(run_api())
+        logger.info("✅ قاعدة البيانات والـ API تعمل الآن")
+
+    app.post_init = post_init
+
+    # 4. تشغيل البوت (هو سيتولى إدارة الـ Loop تلقائياً)
+    logger.info("🤖 البوت بدأ العمل...")
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main() # استدعاء مباشر بدون asyncio.run

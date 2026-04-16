@@ -1,1 +1,8 @@
-pip install python-telegram-bot[job-queue] aiosqlite aiohttp google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client openai
+python-telegram-bot[job-queue]
+aiosqlite
+aiohttp
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
+openai

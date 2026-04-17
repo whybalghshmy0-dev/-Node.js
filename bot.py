@@ -20,7 +20,6 @@ from googleapiclient.http import MediaFileUpload
 import openai
 import os
 import tempfile
-import re
 
 # ==================== الإعدادات ====================
 TOKEN = "7630845149:AAGwRUURpAA4ZqQhMH7W1wz6IV4iDaRN4Kw"
@@ -40,12 +39,13 @@ API_PORT = 8080
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ==================== إعدادات الخدمات الخارجية ====================
+# ==================== الخدمات الخارجية ====================
+ai_client = None
 if AI_ENABLED:
     try:
         ai_client = openai.OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
     except:
-        ai_client = None
+        pass
 
 drive_service = None
 if GOOGLE_DRIVE_ENABLED:
@@ -55,7 +55,7 @@ if GOOGLE_DRIVE_ENABLED:
         )
         drive_service = build('drive', 'v3', credentials=credentials, static_discovery=False)
     except:
-        drive_service = None
+        pass
 
 # ==================== قاعدة البيانات ====================
 async def init_db():
@@ -88,6 +88,13 @@ async def init_db():
                 joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS admins (
+                user_id INTEGER PRIMARY KEY,
+                added_by INTEGER,
+                FOREIGN KEY(user_id) REFERENCES users(user_id)
+            )
+        """)
         await db.commit()
 
 async def get_categories(parent_id=None):
@@ -98,21 +105,26 @@ async def get_categories(parent_id=None):
             cursor = await db.execute("SELECT id, name FROM categories WHERE parent_id = ? ORDER BY id", (parent_id,))
         return await cursor.fetchall()
 
-async def get_category_id_by_name(name: str):
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        cursor = await db.execute("SELECT id FROM categories WHERE name = ?", (name,))
-        row = await cursor.fetchone()
-        return row[0] if row else None
-
 async def get_category_name_by_id(cat_id: int):
     async with aiosqlite.connect(DATABASE_PATH) as db:
         cursor = await db.execute("SELECT name FROM categories WHERE id = ?", (cat_id,))
         row = await cursor.fetchone()
         return row[0] if row else None
 
-# ==================== مساعدات ====================
+async def get_category_id_by_name(name: str):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute("SELECT id FROM categories WHERE name = ?", (name,))
+        row = await cursor.fetchone()
+        return row[0] if row else None
+
+# ==================== صلاحيات ====================
 def is_developer(update: Update) -> bool:
     return update.effective_user.id == DEVELOPER_ID
+
+async def is_admin(user_id: int) -> bool:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute("SELECT 1 FROM admins WHERE user_id = ?", (user_id,))
+        return await cursor.fetchone() is not None
 
 async def save_user(update: Update):
     user = update.effective_user
@@ -123,13 +135,14 @@ async def save_user(update: Update):
         )
         await db.commit()
 
+# ==================== لوحات المفاتيح ====================
 def dev_reply_keyboard():
     return ReplyKeyboardMarkup([
         [KeyboardButton("📂 الخانات"), KeyboardButton("📥 عرض محتوى خانة")],
         [KeyboardButton("➕ إضافة محتوى")],
         [KeyboardButton("🏗️ إنشاء خانة"), KeyboardButton("🗑️ حذف خانة")],
         [KeyboardButton("🧹 حذف عنصر"), KeyboardButton("📢 بث للجميع")],
-        [KeyboardButton("❌ إلغاء/رجوع")]
+        [KeyboardButton("👤 إضافة أدمن"), KeyboardButton("❌ إلغاء/رجوع")]
     ], resize_keyboard=True)
 
 def user_reply_keyboard():
@@ -146,14 +159,6 @@ async def get_categories_keyboard(parent_id=None):
     keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data="cancel")])
     return InlineKeyboardMarkup(keyboard)
 
-async def get_deletecategory_keyboard():
-    cats = await get_categories()
-    if not cats:
-        return InlineKeyboardMarkup([[InlineKeyboardButton("لا توجد خانات", callback_data="noop")]])
-    keyboard = [[InlineKeyboardButton(name, callback_data=f"delcat_{id}")] for id, name in cats]
-    keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data="ui_cancel")])
-    return InlineKeyboardMarkup(keyboard)
-
 async def get_viewcategory_keyboard():
     cats = await get_categories()
     if not cats:
@@ -162,38 +167,18 @@ async def get_viewcategory_keyboard():
     keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data="ui_cancel")])
     return InlineKeyboardMarkup(keyboard)
 
-async def upload_to_drive(file_path, file_name):
-    if not drive_service:
-        return None
-    try:
-        file_metadata = {'name': file_name}
-        if DRIVE_FOLDER_ID:
-            file_metadata['parents'] = [DRIVE_FOLDER_ID]
-        media = MediaFileUpload(file_path, resumable=True)
-        file = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
-        return file.get('webViewLink')
-    except Exception as e:
-        logger.error(f"خطأ في رفع الملف إلى Drive: {e}")
-        return None
+async def get_deletecategory_keyboard():
+    cats = await get_categories()
+    if not cats:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("لا توجد خانات", callback_data="noop")]])
+    keyboard = [[InlineKeyboardButton(name, callback_data=f"delcat_{id}")] for id, name in cats]
+    keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data="ui_cancel")])
+    return InlineKeyboardMarkup(keyback)
 
-async def summarize_text(text: str) -> str:
-    if not AI_ENABLED or not ai_client:
-        return ""
-    try:
-        response = ai_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[{"role": "user", "content": f"لخص النص التالي في جملة واحدة بالعربية:\n{text}"}],
-            max_tokens=100
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        logger.error(f"خطأ في التلخيص: {e}")
-        return ""
-
-# ==================== الأوامر الأساسية ====================
+# ==================== أوامر أساسية ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_user(update)
-    kb = dev_reply_keyboard() if is_developer(update) else user_reply_keyboard()
+    kb = dev_reply_keyboard() if (is_developer(update) or await is_admin(update.effective_user.id)) else user_reply_keyboard()
     await update.message.reply_text("🤖 مرحباً! اختر من الأزرار أدناه:", reply_markup=kb)
 
 async def categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -204,12 +189,13 @@ async def categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "📂 الخانات المتاحة:\n" + "\n".join(f"▫️ {name}" for _, name in cats)
     await update.message.reply_text(text)
 
-# ==================== Conversation Handler ====================
+# ==================== محادثة الإضافة ====================
 WAITING_FOR_CATEGORY, WAITING_FOR_CONTENT = range(2)
 
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_developer(update):
-        await update.message.reply_text("❌ هذا الخيار للمطوّر فقط.")
+    user = update.effective_user
+    if not (is_developer(update) or await is_admin(user.id)):
+        await update.message.reply_text("❌ هذا الخيار للمطوّر أو الأدمن فقط.")
         return ConversationHandler.END
     cats = await get_categories()
     if not cats:
@@ -229,7 +215,7 @@ async def category_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cat_id = int(query.data.split("_")[1])
         context.user_data["temp_category_id"] = cat_id
         cat_name = await get_category_name_by_id(cat_id)
-        await query.edit_message_text(f"📥 الآن أرسل المحتوى إلى '{cat_name}' (نص، صورة، فيديو، ملف، صوت، ملاحظة صوتية، أو /cancel للإلغاء):")
+        await query.edit_message_text(f"📥 الآن أرسل المحتوى إلى '{cat_name}' (نص، صورة، فيديو، ملف، صوت، أو /cancel للإلغاء):")
         return WAITING_FOR_CONTENT
     except Exception as e:
         logger.error(f"خطأ في اختيار الخانة: {e}")
@@ -281,7 +267,6 @@ async def receive_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ نوع المحتوى غير مدعوم.")
             return WAITING_FOR_CONTENT
 
-        # حفظ في قاعدة البيانات
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute(
                 "INSERT INTO items (category_id, type, content, file_id, drive_link, ai_summary) VALUES (?, ?, ?, ?, ?, ?)",
@@ -290,7 +275,7 @@ async def receive_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await db.commit()
 
         await update.message.reply_text("✅ تم تخزين المحتوى بنجاح." + (f"\n🧠 ملخص AI: {ai_summary}" if ai_summary else ""))
-        return WAITING_FOR_CONTENT  # البقاء في نفس الحالة للإضافة المزيد
+        return WAITING_FOR_CONTENT
     except Exception as e:
         logger.error(f"خطأ في حفظ المحتوى: {e}")
         await update.message.reply_text("❌ حدث خطأ أثناء الحفظ.")
@@ -301,9 +286,19 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("temp_category_id", None)
     return ConversationHandler.END
 
-# ==================== أزرار UI ====================
+# ==================== أزرار ReplyKeyboard ====================
 async def ui_reply_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    is_dev = is_developer(update)
+    is_adm = await is_admin(user.id)
+
+    if not (is_dev or is_adm):
+        kb = user_reply_keyboard()
+    else:
+        kb = dev_reply_keyboard()
+
     txt = (update.message.text or "").strip()
+
     if txt == "📂 الخانات":
         await categories(update, context)
     elif txt == "📥 عرض محتوى خانة":
@@ -312,22 +307,26 @@ async def ui_reply_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif txt == "➕ إضافة محتوى":
         return await add_start(update, context)
     elif txt == "❌ إلغاء/رجوع":
-        await update.message.reply_text("تم الإلغاء.", reply_markup=dev_reply_keyboard() if is_developer(update) else user_reply_keyboard())
-    elif txt == "🏗️ إنشاء خانة" and is_developer(update):
+        await update.message.reply_text("تم الإلغاء.", reply_markup=kb)
+    elif txt == "🏗️ إنشاء خانة" and (is_dev or is_adm):
         await update.message.reply_text("أرسل اسم الخانة الجديدة:")
         context.user_data["pending"] = "newcat"
-    elif txt == "🗑️ حذف خانة" and is_developer(update):
+    elif txt == "🗑️ حذف خانة" and (is_dev or is_adm):
         keyboard = await get_deletecategory_keyboard()
         await update.message.reply_text("اختر الخانة لحذفها:", reply_markup=keyboard)
-    elif txt == "🧹 حذف عنصر" and is_developer(update):
+    elif txt == "🧹 حذف عنصر" and (is_dev or is_adm):
         await update.message.reply_text("أرسل رقم العنصر (ID):")
         context.user_data["pending"] = "delitem"
-    elif txt == "📢 بث للجميع" and is_developer(update):
+    elif txt == "📢 بث للجميع" and (is_dev or is_adm):
         await update.message.reply_text("أرسل رسالة البث:")
         context.user_data["pending"] = "broadcast"
+    elif txt == "👤 إضافة أدمن" and is_dev:
+        await update.message.reply_text("أرسل آيدي المستخدم لإضافته كأدمن:")
+        context.user_data["pending"] = "addadmin"
 
 async def ui_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_developer(update):
+    user = update.effective_user
+    if not (is_developer(update) or await is_admin(user.id)):
         return
     pending = context.user_data.get("pending")
     text = update.message.text.strip()
@@ -362,7 +361,20 @@ async def ui_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         await update.message.reply_text(f"✅ تم الإرسال إلى {success} مستخدم.")
         context.user_data.pop("pending", None)
+    elif pending == "addadmin":
+        if text.isdigit():
+            try:
+                async with aiosqlite.connect(DATABASE_PATH) as db:
+                    await db.execute("INSERT OR IGNORE INTO admins (user_id, added_by) VALUES (?, ?)", (int(text), update.effective_user.id))
+                    await db.commit()
+                await update.message.reply_text(f"✅ تم إضافة الأدمن بنجاح.")
+            except:
+                await update.message.reply_text("❌ حدث خطأ أو المستخدم موجود.")
+        else:
+            await update.message.reply_text("❌ أرسل آيدي رقمي صحيح.")
+        context.user_data.pop("pending", None)
 
+# ==================== معالجات الأزرار Inline ====================
 async def ui_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -410,8 +422,9 @@ async def ui_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"خطأ في إرسال العنصر: {e}")
 
     elif data.startswith("delcat_"):
-        if not is_developer(update):
-            await query.edit_message_text("❌ هذا الخيار للمطوّر فقط.")
+        user = update.effective_user
+        if not (is_developer(update) or await is_admin(user.id)):
+            await query.edit_message_text("❌ هذا الخيار للمطوّر أو الأدمن فقط.")
             return
         cat_id = int(data.split("_")[1])
         cat_name = await get_category_name_by_id(cat_id)
@@ -453,7 +466,7 @@ def main():
     app.add_handler(CommandHandler("categories", categories))
     app.add_handler(CommandHandler("cancel", cancel))
 
-    # الأزرار
+    # الأزرار Inline
     app.add_handler(CallbackQueryHandler(ui_callback, pattern="^(viewcat_|delcat_|ui_cancel|noop)"))
 
     # الرسائل النصية

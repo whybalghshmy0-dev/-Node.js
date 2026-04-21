@@ -1,19 +1,3 @@
-# requirements.txt
-
-# البوت الأساسي
-python-telegram-bot[job-queue]==21.5
-
-# قاعدة البيانات
-aiosqlite==0.20.0
-
-# الخادم
-aiohttp==3.9.5
-
-# Google Drive
-google-auth==2.34.0
-google-auth-oauthlib==1.2.1
-google-auth-httplib2==0.2.0
-google-api-python-client==2.143.0
-
-# الذكاء الاصطناعي
-openai==1.45.0
+telethon
+flask
+gunicorn

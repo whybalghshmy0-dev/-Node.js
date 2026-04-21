@@ -701,10 +701,6 @@ async def on_start():
     except Exception as e:
         print(f"خطأ في بدء البوت: {e}")
 
-@client.on(events.EventsHandler)
-async def on_connect(event):
-    """عند الاتصال"""
-    print("✅ تم الاتصال بتيليجرام")
 
 if __name__ == "__main__":
     keep_alive()

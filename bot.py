@@ -706,9 +706,8 @@ if __name__ == "__main__":
     keep_alive()
     print("🚀 البوت يعمل...")
 
-    # تشغيل معالج البدء
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(on_start())
-
-    client.start()
-    client.run_until_disconnected()
+    # الطريقة الصحيحة لتشغيل البوت في الإصدارات الحديثة
+    with client:
+        client.loop.run_until_complete(on_start())
+        print("✅ تم تشغيل المهام الأولية")
+        client.run_until_disconnected()

@@ -1,713 +1,288 @@
-"""
-بوت تيليجرام متكامل للمراقبة والتحكم
-المطور: 7411444902
-"""
+import requests
+import time
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
 
-from telethon import TelegramClient, events, functions
-from telethon.errors import FloodWaitError, PeerFloodError, UserBlockedError
-from telethon.tl.types import User, Channel, Chat, UserStatusOnline, UserStatusOffline
-from flask import Flask
-from threading import Thread
-import asyncio
-import json
-import os
-from datetime import datetime
-from pathlib import Path
+# ===================== الإعدادات =====================
+BOT_TOKEN = "7243808108:AAFxlT-1HQ6twyVewzWqgdEgXd0EK_j4o5Y"
+HERO_API_KEY = "b7c49e0f481e15e7b96eAAb85e60570d"
+HERO_BASE_URL = "https://hero-sms.com/api/v1"
 
-# ==================== الإعدادات ====================
-app = Flask('')
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-# إعدادات API
-API_ID = 21249786
-API_HASH = "0ca10df559680289323e51f9d79f1e5a"
+# ===================== Hero SMS API =====================
 
-# المطور الأساسي
-DEVELOPER_ID = 7411444902
-
-# المجلدات
-BASE_DIR = Path(__file__).parent
-DATA_DIR = BASE_DIR / "data"
-DATA_DIR.mkdir(exist_ok=True)
-
-# ملفات البيانات
-USERS_FILE = DATA_DIR / "users.json"
-GROUPS_FILE = DATA_DIR / "groups.json"
-SETTINGS_FILE = DATA_DIR / "settings.json"
-LOGS_FILE = DATA_DIR / "logs.json"
-
-# ==================== نظام البيانات ====================
-def load_json(file_path):
-    """تحميل بيانات من ملف JSON"""
+def get_balance():
     try:
-        if file_path.exists():
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {} if 'settings' not in str(file_path) else {"watched_users": [], "auto_forward": True, "verified_users": []}
+        r = requests.get(
+            f"{HERO_BASE_URL}/balance",
+            params={"api_key": HERO_API_KEY},
+            timeout=10
+        )
+        return r.json().get("balance", "غير معروف")
     except Exception as e:
-        print(f"خطأ في تحميل {file_path}: {e}")
-        return {} if 'settings' not in str(file_path) else {"watched_users": [], "auto_forward": True, "verified_users": []}
+        logger.error(f"get_balance: {e}")
+        return None
 
-def save_json(file_path, data):
-    """حفظ بيانات إلى ملف JSON"""
+
+def get_free_services():
+    """جلب الخدمات المجانية فقط (price = 0)"""
     try:
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        return True
+        r = requests.get(
+            f"{HERO_BASE_URL}/services",
+            params={"api_key": HERO_API_KEY},
+            timeout=10
+        )
+        data = r.json()
+        if isinstance(data, dict):
+            return {
+                code: info for code, info in data.items()
+                if isinstance(info, dict) and float(info.get("price", 1)) == 0
+            }
+        return {}
     except Exception as e:
-        print(f"خطأ في حفظ {file_path}: {e}")
-        return False
+        logger.error(f"get_free_services: {e}")
+        return {}
 
-# تحميل البيانات
-users_data = load_json(USERS_FILE)
-groups_data = load_json(GROUPS_FILE)
-settings = load_json(SETTINGS_FILE)
 
-# إعدادات افتراضية
-if 'watched_users' not in settings:
-    settings['watched_users'] = []
-if 'auto_forward' not in settings:
-    settings['auto_forward'] = True
-if 'verified_users' not in settings:
-    settings['verified_users'] = []
-if 'bot_started' not in settings:
-    settings['bot_started'] = False
-
-save_json(SETTINGS_FILE, settings)
-
-# ==================== Flask Server ====================
-@app.route('/')
-def home():
-    return "🤖 البوت يعمل!"
-
-def run():
-    app.run(host='0.0.0.0', port=8080)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.daemon = True
-    t.start()
-
-# ==================== تيليجرام ====================
-client = TelegramClient("bot", API_ID, API_HASH)
-
-# القروب المستهدف للإرسال
-TARGETS = ["@fullmark13"]
-
-# الكلمات المفتاحية
-KEYWORDS = [
-    "يحل", "يسوي", "عرض", "بحث", "تكليف", "يعرف",
-    "فاهم", "يشرح", "مختص", "خصوصي", "سيفي", "تقرير"
-]
-
-# ==================== أوامر التحكم ====================
-def is_developer(user_id):
-    """التحقق إذا كان المستخدم هو المطور"""
-    return user_id == DEVELOPER_ID
-
-def is_watched_user(user_id):
-    """التحقق إذا كان المستخدم مراقب"""
-    return str(user_id) in settings.get('watched_users', [])
-
-def is_verified(user_id):
-    """التحقق إذا كان المستخدم موثق"""
-    return str(user_id) in settings.get('verified_users', []) or is_developer(user_id)
-
-async def send_to_dev(message, from_user=None):
-    """إرسال رسالة للمطور"""
+def get_free_number(service: str, country: str = "ru"):
     try:
-        msg = f"📩 رسالة من "
-        if from_user:
-            msg += f"@{from_user.username}" if from_user.username else from_user.first_name
-            msg += f" (ID: {from_user.id})"
-        else:
-            msg += "نظام البوت"
-        msg += f"\n\n{message}"
-        await client.send_message(DEVELOPER_ID, msg)
+        r = requests.get(
+            f"{HERO_BASE_URL}/get-number",
+            params={"api_key": HERO_API_KEY, "service": service, "country": country, "price": 0},
+            timeout=10,
+        )
+        return r.json()
     except Exception as e:
-        print(f"خطأ في إرسال للمطور: {e}")
+        logger.error(f"get_free_number: {e}")
+        return None
 
-async def forward_to_targets(message, source_name=""):
-    """إرسال الرسائل للأهداف"""
-    for target in TARGETS:
-        try:
-            await asyncio.sleep(10)
-            await client.forward_messages(target, message)
-            print(f"✅ تم توجيه رسالة من {source_name} إلى {target}")
-        except FloodWaitError as e:
-            print(f"⏳ FloodWaitError: انتظار {e.seconds} ثانية")
-            await asyncio.sleep(e.seconds)
-        except PeerFloodError:
-            print("🚫 PeerFloodError - انتظار...")
-        except Exception as e:
-            print(f"⚠️ خطأ: {e}")
 
-async def get_chat_members(chat):
-    """جلب معلومات الأعضاء"""
+def get_sms(order_id: str):
     try:
-        participants = await client.get_participants(chat)
-        return participants
+        r = requests.get(
+            f"{HERO_BASE_URL}/get-sms",
+            params={"api_key": HERO_API_KEY, "order_id": order_id},
+            timeout=10,
+        )
+        return r.json()
     except Exception as e:
-        print(f"خطأ في جلب الأعضاء: {e}")
-        return []
+        logger.error(f"get_sms: {e}")
+        return None
 
-def get_member_status(member):
-    """الحصول على حالة العضو (متصل/غير متصل)"""
-    if hasattr(member, 'status'):
-        if isinstance(member.status, UserStatusOnline):
-            return "🟢 متصل"
-        elif isinstance(member.status, UserStatusOffline):
-            return "⚫ غير متصل"
-    return "❓ غير معروف"
 
-def build_control_menu():
-    """بناء قائمة التحكم"""
-    menu = """
-╔══════════════════════════════╗
-║   🎛 لوحة تحكم المطور    ║
-╠══════════════════════════════╣
-║                              ║
-║  📊 أوامر عامة:              ║
-║  /start - بدء البوت          ║
-║  /status - حالة البوت        ║
-║  /help - المساعدة           ║
-║                              ║
-║  👥 إدارة المستخدمين:        ║
-║  /adduser [ID] - إضافة      ║
-║  /removeuser [ID] - حذف     ║
-║  /listusers - عرض المضافين  ║
-║  /userinfo [ID] - معلومات   ║
-║                              ║
-║  🚫 الحظر والإدارة:         ║
-║  /ban [ID] - حظر            ║
-║  /unban [ID] - إلغاء الحظر ║
-║  /banned - عرض المحظورين   ║
-║                              ║
-║  📱 معلومات المستخدمين:      ║
-║  /online - المتصلين الآن    ║
-║  /offline - غير المتصلين    ║
-║  /members [رابط القروب]     ║
-║                              ║
-║  👥 إدارة القروبات:         ║
-║  /addgroup - إضافة قروب    ║
-║  /removegroup - حذف         ║
-║  /listgroups - عرض القروبات║
-║                              ║
-║  🔧 الإعدادات:              ║
-║  /watch - تفعيل المراقبة   ║
-║  /unwatch - إيقاف المراقبة  ║
-║  /settings - عرض الإعدادات ║
-║                              ║
-║  📋 السجلات:                ║
-║  /stats - الإحصائيات        ║
-║  /logs [عدد] - عرض السجلات ║
-║  /broadcast [نص] - رسالة   ║
-║                              ║
-╚══════════════════════════════╝
-    """
-    return menu.strip()
-
-def build_verification_menu():
-    """قائمة التحقق"""
-    return """
-🔐 نظام التحقق
-
-مرحباً! هذا البوت خاص بالمطور.
-
-للوصول إلى لوحة التحكم، يرجى الانتظار للموافقة.
-
-أرسل /verify [رمز التحقق] للمتابعة.
-    """
-
-@client.on(events.NewMessage)
-async def handler(event):
-    """معالج الرسائل الرئيسي"""
+def cancel_number(order_id: str):
     try:
-        sender = await event.get_sender()
-        chat = await event.get_chat()
+        r = requests.get(
+            f"{HERO_BASE_URL}/cancel",
+            params={"api_key": HERO_API_KEY, "order_id": order_id},
+            timeout=10,
+        )
+        return r.json()
+    except Exception as e:
+        logger.error(f"cancel_number: {e}")
+        return None
 
-        text = event.raw_text.strip() if event.raw_text else ""
 
-        user_id = sender.id if sender else 0
-        username = sender.username if sender else "بدون يوزر"
-        first_name = sender.first_name if sender else "مستخدم"
+# ===================== لوحات المفاتيح =====================
 
-        # تسجيل الرسالة
-        log_entry = {
-            "time": datetime.now().isoformat(),
-            "user_id": user_id,
-            "username": username,
-            "first_name": first_name,
-            "chat_id": chat.id if chat else 0,
-            "chat_title": chat.title if hasattr(chat, 'title') else str(chat),
-            "message": text[:200] if text else "[وسائط]"
-        }
-        logs = load_json(LOGS_FILE)
-        if 'messages' not in logs:
-            logs['messages'] = []
-        logs['messages'].append(log_entry)
-        # الاحتفاظ بآخر 1000 رسالة
-        if len(logs['messages']) > 1000:
-            logs['messages'] = logs['messages'][-1000:]
-        save_json(LOGS_FILE, logs)
+def main_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📱 احصل على رقم مجاني", callback_data="get_number_menu")],
+        [InlineKeyboardButton("💰 رصيدي", callback_data="balance")],
+        [InlineKeyboardButton("ℹ️ مساعدة", callback_data="help")],
+    ])
 
-        # ==================== نظام التحقق ====================
-        if not is_developer(user_id) and str(user_id) not in settings.get('verified_users', []):
-            if text.startswith('/verify '):
-                # نظام التحقق - يمكن تطويره لاحقاً
-                await event.reply("🔐 جاري التحقق...")
-                settings['verified_users'].append(str(user_id))
-                save_json(SETTINGS_FILE, settings)
-                await event.reply("✅ تم التحقق بنجاح!")
-            elif text.startswith('/start') or text == "/start":
-                await event.reply(build_verification_menu())
+
+def back_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="back")]
+    ])
+
+
+# ===================== أوامر البوت =====================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 *أهلاً بك في بوت الأرقام المجانية!*\n\n"
+        "🆓 هذا البوت يوفر أرقام *مجانية* فقط لاستقبال رسائل SMS.\n\n"
+        "اختر من القائمة:",
+        parse_mode="Markdown",
+        reply_markup=main_keyboard(),
+    )
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    # ---- الرصيد ----
+    if data == "balance":
+        balance = get_balance()
+        text = f"💰 *رصيدك الحالي:* `{balance}`" if balance is not None else "❌ تعذر جلب الرصيد."
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_keyboard())
+
+    # ---- قائمة الخدمات المجانية ----
+    elif data == "get_number_menu":
+        await query.edit_message_text("⏳ جاري تحميل الخدمات المجانية...")
+        services = get_free_services()
+
+        if not services:
+            await query.edit_message_text(
+                "😔 لا توجد خدمات مجانية متاحة حالياً.\nحاول لاحقاً.",
+                reply_markup=back_keyboard()
+            )
             return
 
-        # ==================== تحكم المطور ====================
-        if is_developer(user_id):
+        items = list(services.items())[:12]
+        keyboard = []
+        for svc_code, svc_info in items:
+            name = svc_info.get("name", svc_code) if isinstance(svc_info, dict) else svc_code
+            count = svc_info.get("count", "")
+            label = f"🆓 {name}" + (f" ({count})" if count else "")
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"select_svc:{svc_code}")])
+        keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back")])
 
-            if text.startswith('/start') or text == "/start":
-                await event.reply(f"""
-🎉 مرحباً بك في لوحة تحكم البوت!
-
-👤 المطور: {DEVELOPER_ID}
-
-{build_control_menu()}
-                """)
-                return
-
-            elif text.startswith('/help') or text == "/help":
-                await event.reply(build_control_menu())
-                return
-
-            elif text.startswith('/status'):
-                watched = settings.get('watched_users', [])
-                verified = settings.get('verified_users', [])
-                await event.reply(f"""
-📊 حالة البوت:
-━━━━━━━━━━━━━━━━━
-🟢 الوضع: يعمل
-👥 المراقبون: {len(watched)} مستخدم
-✅ الموثقون: {len(verified)} مستخدم
-📢 التوجيه التلقائي: {'مفعل' if settings.get('auto_forward') else 'معطل'}
-━━━━━━━━━━━━━━━━━
-⏰ وقت التشغيل: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-                """)
-                return
-
-            # ==================== إدارة المستخدمين ====================
-            elif text.startswith('/adduser '):
-                try:
-                    target_id = text.split()[1].strip()
-                    if target_id.isdigit():
-                        target_id = int(target_id)
-                    if str(target_id) not in settings['watched_users']:
-                        settings['watched_users'].append(str(target_id))
-                        save_json(SETTINGS_FILE, settings)
-                        await event.reply(f"✅ تم إضافة المستخدم {target_id} للمراقبة")
-                        await send_to_dev(f"➕ تم إضافة مستخدم جديد للمراقبة: {target_id}", sender)
-                    else:
-                        await event.reply("⚠️ المستخدم موجود مسبقاً")
-                except (IndexError, ValueError):
-                    await event.reply("❌ الصيغة: /adduser [ID]\nمثال: /adduser 123456789")
-                return
-
-            elif text.startswith('/removeuser '):
-                try:
-                    target_id = text.split()[1].strip()
-                    if target_id in settings['watched_users']:
-                        settings['watched_users'].remove(target_id)
-                        save_json(SETTINGS_FILE, settings)
-                        await event.reply(f"✅ تم حذف المستخدم {target_id}")
-                        await send_to_dev(f"➖ تم حذف مستخدم من المراقبة: {target_id}", sender)
-                    else:
-                        await event.reply("⚠️ المستخدم غير موجود")
-                except IndexError:
-                    await event.reply("❌ الصيغة: /removeuser [ID]")
-                return
-
-            elif text == '/listusers':
-                watched = settings.get('watched_users', [])
-                if watched:
-                    msg = "👥 المستخدمون المراقبون:\n━━━━━━━━━━━━━━━━━\n"
-                    for i, uid in enumerate(watched, 1):
-                        msg += f"{i}. `{uid}`\n"
-                    msg += f"━━━━━━━━━━━━━━━━━\n📊 المجموع: {len(watched)} مستخدم"
-                    await event.reply(msg)
-                else:
-                    await event.reply("📭 لا يوجد مستخدمون مراقبون")
-                return
-
-            elif text.startswith('/userinfo '):
-                try:
-                    target_id = int(text.split()[1])
-                    try:
-                        user = await client.get_entity(target_id)
-                        info = f"""
-👤 معلومات المستخدم:
-━━━━━━━━━━━━━━━━━
-🆔 الآيدي: {user.id}
-📛 الاسم: {user.first_name}
-👤 اليوزر: {'@' + user.username if user.username else 'غير موجود'}
-━━━━━━━━━━━━━━━━━
-📊 الحالة: {'محظور' if user.restricted else 'نشط'}
-🔒 مراقب: {'نعم' if str(target_id) in settings.get('watched_users', []) else 'لا'}
-                        """
-                        await event.reply(info)
-                    except:
-                        await event.reply(f"❌ لا يمكن العثور على المستخدم: {target_id}")
-                except (IndexError, ValueError):
-                    await event.reply("❌ الصيغة: /userinfo [ID]")
-                return
-
-            # ==================== الحظر والإدارة ====================
-            elif text.startswith('/ban '):
-                try:
-                    target_id = int(text.split()[1])
-                    try:
-                        await client(functions.contacts.BlockRequest(id=target_id))
-                        await event.reply(f"🚫 تم حظر المستخدم {target_id}")
-                        await send_to_dev(f"🚫 تم حظر المستخدم: {target_id}", sender)
-                    except Exception as e:
-                        await event.reply(f"❌ فشل الحظر: {str(e)}")
-                except (IndexError, ValueError):
-                    await event.reply("❌ الصيغة: /ban [ID]")
-                return
-
-            elif text.startswith('/unban '):
-                try:
-                    target_id = int(text.split()[1])
-                    try:
-                        await client(functions.contacts.UnblockRequest(id=target_id))
-                        await event.reply(f"✅ تم إلغاء حظر المستخدم {target_id}")
-                        await send_to_dev(f"✅ تم إلغاء الحظر: {target_id}", sender)
-                    except Exception as e:
-                        await event.reply(f"❌ فشل إلغاء الحظر: {str(e)}")
-                except (IndexError, ValueError):
-                    await event.reply("❌ الصيغة: /unban [ID]")
-                return
-
-            elif text == '/banned':
-                try:
-                    blocked = await client(functions.contacts.GetBlockedRequest(0, 100))
-                    if blocked.users:
-                        msg = "🚫 المستخدمون المحظورون:\n━━━━━━━━━━━━━━━━━\n"
-                        for user in blocked.users:
-                            msg += f"• {user.first_name} (ID: {user.id})\n"
-                        await event.reply(msg)
-                    else:
-                        await event.reply("✅ لا يوجد مستخدمون محظورون")
-                except Exception as e:
-                    await event.reply(f"❌ خطأ: {str(e)}")
-                return
-
-            # ==================== معلومات المستخدمين ====================
-            elif text == '/online':
-                # جلب جميع المحادثات والبحث عن المتصلين
-                dialogs = await client.get_dialogs()
-                online_count = 0
-                online_users = []
-
-                for dialog in dialogs:
-                    if dialog.is_user:
-                        user = dialog.entity
-                        if hasattr(user, 'status') and isinstance(user.status, UserStatusOnline):
-                            online_count += 1
-                            online_users.append(user)
-
-                if online_users:
-                    msg = f"🟢 المتصلون الآن ({online_count}):\n━━━━━━━━━━━━━━━━━\n"
-                    for user in online_users[:20]:  # عرض أول 20
-                        msg += f"• {user.first_name} (ID: {user.id})\n"
-                    if online_count > 20:
-                        msg += f"\n... و {online_count - 20} آخرون"
-                    await event.reply(msg)
-                else:
-                    await event.reply("⚫ لا يوجد مستخدمون متصلون حالياً")
-                return
-
-            elif text == '/offline':
-                dialogs = await client.get_dialogs()
-                offline_count = 0
-                offline_users = []
-
-                for dialog in dialogs:
-                    if dialog.is_user:
-                        user = dialog.entity
-                        if hasattr(user, 'status'):
-                            if isinstance(user.status, UserStatusOffline):
-                                offline_count += 1
-                                offline_users.append((user, user.status.was_online if hasattr(user.status, 'was_online') else None))
-
-                if offline_users:
-                    msg = f"⚫ غير المتصلين ({offline_count}):\n━━━━━━━━━━━━━━━━━\n"
-                    for user, last_seen in offline_users[:20]:
-                        last = f"آخر ظهور: {last_seen}" if last_seen else ""
-                        msg += f"• {user.first_name} (ID: {user.id}) {last}\n"
-                    if offline_count > 20:
-                        msg += f"\n... و {offline_count - 20} آخرون"
-                    await event.reply(msg)
-                else:
-                    await event.reply("❓ لا يمكن تحديد حالة المستخدمين")
-                return
-
-            elif text.startswith('/members '):
-                try:
-                    group_link = text.split()[1]
-                    try:
-                        chat_entity = await client.get_entity(group_link)
-                        if hasattr(chat_entity, 'title'):
-                            participants = await client.get_participants(chat_entity)
-                            total = len(participants)
-
-                            online = 0
-                            offline = 0
-                            members_list = []
-
-                            for p in participants:
-                                status = get_member_status(p)
-                                if "متصل" in status:
-                                    online += 1
-                                else:
-                                    offline += 1
-                                members_list.append({
-                                    'name': p.first_name,
-                                    'id': p.id,
-                                    'username': p.username,
-                                    'status': status
-                                })
-
-                            msg = f"""
-👥 أعضاء القروب: {chat_entity.title}
-━━━━━━━━━━━━━━━━━
-📊 المجموع: {total}
-🟢 متصل: {online}
-⚫ غير متصل: {offline}
-━━━━━━━━━━━━━━━━━
-
-"""
-                            # عرض أول 30 عضو
-                            for m in members_list[:30]:
-                                uname = f"@{m['username']}" if m['username'] else ""
-                                msg += f"{m['status']} {m['name']} {uname}\n"
-
-                            if total > 30:
-                                msg += f"\n... و {total - 30} عضو آخر"
-
-                            await event.reply(msg)
-                        else:
-                            await event.reply("❌ هذا ليس قروباً")
-                    except Exception as e:
-                        await event.reply(f"❌ لا يمكن الوصول للقروب: {str(e)}")
-                except IndexError:
-                    await event.reply("❌ الصيغة: /members [رابط القروب]")
-                return
-
-            # ==================== إدارة القروبات ====================
-            elif text == '/addgroup':
-                await event.reply("📎 أرسل رابط القروب لإضافته للمراقبة:\n\nمثال: /addgroup https://t.me/joinchat/...")
-                settings['waiting_for_group'] = True
-                save_json(SETTINGS_FILE, settings)
-                return
-
-            elif text == '/removegroup':
-                groups = groups_data.get('groups', [])
-                if groups:
-                    msg = "🗑 اختر القروب للحذف:\n\n"
-                    for i, g in enumerate(groups, 1):
-                        msg += f"{i}. {g}\n"
-                    msg += "\nاستخدم /removegroup [رقم]"
-                    await event.reply(msg)
-                else:
-                    await event.reply("📭 لا توجد قروبات مضافة")
-                return
-
-            elif text.startswith('/removegroup '):
-                try:
-                    idx = int(text.split()[1]) - 1
-                    groups = groups_data.get('groups', [])
-                    if 0 <= idx < len(groups):
-                        removed = groups.pop(idx)
-                        groups_data['groups'] = groups
-                        save_json(GROUPS_FILE, groups_data)
-                        await event.reply(f"✅ تم حذف القروب: {removed}")
-                    else:
-                        await event.reply("❌ رقم غير صحيح")
-                except:
-                    await event.reply("❌ الصيغة: /removegroup [رقم]")
-                return
-
-            elif text == '/listgroups':
-                groups = groups_data.get('groups', [])
-                if groups:
-                    msg = "👥 القروبات المضافة:\n━━━━━━━━━━━━━━━━━\n"
-                    for i, g in enumerate(groups, 1):
-                        msg += f"{i}. {g}\n"
-                    await event.reply(msg)
-                else:
-                    await event.reply("📭 لا توجد قروبات مضافة")
-                return
-
-            # ==================== الإعدادات ====================
-            elif text == '/watch':
-                settings['auto_forward'] = True
-                save_json(SETTINGS_FILE, settings)
-                await event.reply("✅ تم تفعيل المراقبة والتوجيه التلقائي")
-                return
-
-            elif text == '/unwatch':
-                settings['auto_forward'] = False
-                save_json(SETTINGS_FILE, settings)
-                await event.reply("⛔ تم إيقاف المراقبة والتوجيه")
-                return
-
-            elif text == '/settings':
-                watched = settings.get('watched_users', [])
-                verified = settings.get('verified_users', [])
-                await event.reply(f"""
-⚙️ الإعدادات الحالية:
-━━━━━━━━━━━━━━━━━
-📢 التوجيه التلقائي: {'🟢 مفعل' if settings.get('auto_forward') else '🔴 معطل'}
-👥 عدد المراقبين: {len(watched)}
-✅ عدد الموثقين: {len(verified)}
-👥 عدد القروبات: {len(groups_data.get('groups', []))}
-━━━━━━━━━━━━━━━━━
-🎯 الأهدات: {', '.join(TARGETS)}
-🔑 الكلمات: {len(KEYWORDS)} كلمة
-                """)
-                return
-
-            # ==================== السجلات ====================
-            elif text == '/stats':
-                logs = load_json(LOGS_FILE)
-                msgs = logs.get('messages', [])
-                watched = settings.get('watched_users', [])
-                await event.reply(f"""
-📈 الإحصائيات:
-━━━━━━━━━━━━━━━━━
-📨 إجمالي الرسائل: {len(msgs)}
-👥 المستخدمون المراقبون: {len(watched)}
-📅 آخر رسالة: {msgs[-1]['time'][:19] if msgs else 'لا يوجد'}
-🔄 الجلسات: 1
-━━━━━━━━━━━━━━━━━
-⏰ وقت الطلب: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-                """)
-                return
-
-            elif text.startswith('/logs'):
-                logs = load_json(LOGS_FILE)
-                msgs = logs.get('messages', [])
-                try:
-                    count = int(text.split()[1]) if len(text.split()) > 1 else 10
-                    count = min(count, 50)  # الحد الأقصى 50
-                except:
-                    count = 10
-
-                if msgs:
-                    recent = msgs[-count:]
-                    msg = f"📋 آخر {len(recent)} رسائل:\n━━━━━━━━━━━━━━━━━\n"
-                    for m in recent:
-                        time_str = m['time'][11:19]
-                        uname = m.get('username', '?')
-                        message = m.get('message', '[وسائط]')[:60]
-                        msg += f"[{time_str}] @{uname}: {message}...\n"
-                    await event.reply(msg)
-                else:
-                    await event.reply("📭 لا توجد سجلات")
-                return
-
-            elif text.startswith('/broadcast '):
-                broadcast_text = text[11:]
-                if not broadcast_text:
-                    await event.reply("❌ يرجى كتابة النص بعد /broadcast")
-                    return
-
-                sent = 0
-                for uid in settings.get('watched_users', []):
-                    try:
-                        await client.send_message(int(uid), f"📢 رسالة من المطور:\n\n{broadcast_text}")
-                        sent += 1
-                        await asyncio.sleep(1)  # تجنب الفلود
-                    except Exception as e:
-                        print(f"فشل إرسال لـ {uid}: {e}")
-
-                await event.reply(f"✅ تم إرسال الرسالة لـ {sent} مستخدم")
-                return
-
-        # ==================== توجيه المراقبين ====================
-        # المراقبون يوصل لهم كل الرسائل
-        if is_watched_user(user_id):
-            # توجيه الرسائل التي تحتوي على كلمات مفتاحية
-            if any(word in text for word in KEYWORDS):
-                await forward_to_targets(event.message, first_name)
-
-            # أو يمكن توجيه كل الرسائل
-            # await client.forward_messages(DEVELOPER_ID, event.message)
-
-    except FloodWaitError as e:
-        print(f"⏳ FloodWaitError: انتظار {e.seconds} ثانية")
-        await asyncio.sleep(e.seconds)
-    except PeerFloodError:
-        print("🚫 PeerFloodError - انتظار...")
-        await asyncio.sleep(60)
-    except Exception as e:
-        print(f"خطأ في المعالج: {e}")
-
-async def on_start():
-    """عند بدء البوت"""
-    print("🚀 جاري بدء البوت...")
-
-    try:
-        # إرسال رسالة ترحيب للمطور
-        await client.send_message(
-            DEVELOPER_ID,
-            """
-🤖 تم تشغيل البوت بنجاح!
-
-━━━━━━━━━━━━━━━━━
-🎛 لوحة التحكم متاحة الآن.
-
-📋 الأوامر المتاحة:
-• /start - بدء البوت
-• /help - المساعدة
-• /status - حالة البوت
-
-━━━━━━━━━━━━━━━━━
-⏰ وقت التشغيل: """ + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + """
-        """
+        await query.edit_message_text(
+            f"📋 *الخدمات المجانية المتاحة ({len(services)}):*\n\nاختر الخدمة:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
-        print("✅ تم إرسال رسالة الترحيب للمطور")
 
-        # تحديث حالة البوت
-        settings['bot_started'] = True
-        save_json(SETTINGS_FILE, settings)
+    # ---- اختيار دولة ----
+    elif data.startswith("select_svc:"):
+        svc_code = data.split(":", 1)[1]
+        keyboard = [
+            [InlineKeyboardButton("🇷🇺 روسيا", callback_data=f"get_num:{svc_code}:ru")],
+            [InlineKeyboardButton("🇺🇸 أمريكا", callback_data=f"get_num:{svc_code}:us")],
+            [InlineKeyboardButton("🇬🇧 بريطانيا", callback_data=f"get_num:{svc_code}:gb")],
+            [InlineKeyboardButton("🇩🇪 ألمانيا", callback_data=f"get_num:{svc_code}:de")],
+            [InlineKeyboardButton("🌍 أي دولة", callback_data=f"get_num:{svc_code}:any")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="get_number_menu")],
+        ]
+        await query.edit_message_text(
+            f"🌍 *اختر الدولة للخدمة:* `{svc_code}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
 
-        # جلب القروبات والتواصلات
-        dialogs = await client.get_dialogs()
-        print(f"📊 عدد المحادثات: {len(dialogs)}")
+    # ---- جلب رقم مجاني ----
+    elif data.startswith("get_num:"):
+        _, svc_code, country = data.split(":", 2)
+        await query.edit_message_text("⏳ جاري طلب رقم مجاني...")
+        result = get_free_number(svc_code, country)
 
-        # تسجيل القروبات
-        groups = []
-        for dialog in dialogs:
-            if dialog.is_group or dialog.is_channel:
-                chat = dialog.entity
-                if hasattr(chat, 'title'):
-                    groups.append(chat.title)
-                    print(f"  📌 {chat.title}")
+        if not result or "order_id" not in result:
+            msg = result.get("message", "خطأ غير معروف") if result else "تعذر الاتصال بالخادم"
+            await query.edit_message_text(
+                f"❌ *فشل طلب الرقم*\n\n`{msg}`\n\nلا تتوفر أرقام مجانية لهذه الخدمة حالياً.",
+                parse_mode="Markdown",
+                reply_markup=back_keyboard()
+            )
+            return
 
-        # حفظ القروبات
-        groups_data['groups'] = groups
-        save_json(GROUPS_FILE, groups_data)
+        order_id = str(result["order_id"])
+        number = result.get("number", "غير معروف")
 
-    except Exception as e:
-        print(f"خطأ في بدء البوت: {e}")
+        keyboard = [
+            [InlineKeyboardButton("📩 تحقق من SMS", callback_data=f"check_sms:{order_id}")],
+            [InlineKeyboardButton("❌ إلغاء الرقم", callback_data=f"cancel:{order_id}")],
+            [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="back")],
+        ]
+        await query.edit_message_text(
+            f"✅ *تم الحصول على الرقم المجاني!*\n\n"
+            f"📱 *الرقم:* `{number}`\n"
+            f"🆔 *رقم الطلب:* `{order_id}`\n\n"
+            f"أرسل الكود إلى هذا الرقم ثم اضغط *تحقق من SMS* ⬇️",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    # ---- التحقق من SMS ----
+    elif data.startswith("check_sms:"):
+        order_id = data.split(":", 1)[1]
+        await query.edit_message_text("⏳ جاري البحث عن الرسالة...")
+
+        sms_text = None
+        for attempt in range(3):
+            result = get_sms(order_id)
+            if result and result.get("sms"):
+                sms_text = result["sms"]
+                break
+            if attempt < 2:
+                time.sleep(3)
+
+        keyboard = [
+            [InlineKeyboardButton("🔄 تحديث", callback_data=f"check_sms:{order_id}")],
+            [InlineKeyboardButton("❌ إلغاء الرقم", callback_data=f"cancel:{order_id}")],
+            [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="back")],
+        ]
+
+        if sms_text:
+            await query.edit_message_text(
+                f"📩 *تم استلام الرسالة!*\n\n`{sms_text}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        else:
+            await query.edit_message_text(
+                "⌛ *لم تصل رسالة بعد.*\n\nاضغط *تحديث* للمحاولة مجدداً أو انتظر قليلاً.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+
+    # ---- إلغاء الرقم ----
+    elif data.startswith("cancel:"):
+        order_id = data.split(":", 1)[1]
+        result = cancel_number(order_id)
+        ok = result and result.get("status") in ("ok", "success", 1, "1")
+        msg = "✅ تم إلغاء الرقم بنجاح." if ok else "⚠️ تعذر الإلغاء أو الرقم منتهي بالفعل."
+        await query.edit_message_text(msg, reply_markup=back_keyboard())
+
+    # ---- مساعدة ----
+    elif data == "help":
+        await query.edit_message_text(
+            "ℹ️ *كيف يعمل البوت:*\n\n"
+            "1️⃣ اضغط *احصل على رقم مجاني*\n"
+            "2️⃣ اختر الخدمة التي تريدها\n"
+            "3️⃣ اختر الدولة\n"
+            "4️⃣ استخدم الرقم في التطبيق\n"
+            "5️⃣ اضغط *تحقق من SMS* لاستلام الكود\n\n"
+            "💡 البوت يعرض الأرقام المجانية فقط.\n"
+            "❗ إذا لم تصل رسالة، اضغط تحديث عدة مرات.",
+            parse_mode="Markdown",
+            reply_markup=back_keyboard(),
+        )
+
+    # ---- رجوع ----
+    elif data == "back":
+        await query.edit_message_text(
+            "👋 *القائمة الرئيسية*\n\nاختر ما تريد:",
+            parse_mode="Markdown",
+            reply_markup=main_keyboard(),
+        )
+
+
+# ===================== تشغيل البوت =====================
+
+def main():
+    print("🚀 البوت يعمل - أرقام مجانية فقط...")
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
-    keep_alive()
-    print("🚀 البوت يعمل...")
-
-    # الطريقة الصحيحة لتشغيل البوت في الإصدارات الحديثة
-    with client:
-        client.loop.run_until_complete(on_start())
-        print("✅ تم تشغيل المهام الأولية")
-        client.run_until_disconnected()
+    main()
